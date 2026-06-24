@@ -1,7 +1,7 @@
 # Crypto Trader — Plan de Mejoras
 
-**Fecha:** 2026-06-18
-**Última revisión:** 40+ contenedores activos, 20 paper-trading en paralelo, Sprint 1-3 completados
+**Fecha:** 2026-06-23
+**Última revisión:** Mock mode activo (sin exchange real), 20 paper-trading en paralelo, Sprint 1-4 completados
 
 ---
 
@@ -153,7 +153,7 @@ time_filter:schedule   → horarios auto-calculados
 
 ---
 
-## Fase 3: Optimización de Estrategias Ganadoras (En curso)
+## Fase 3: Optimización de Estrategias Ganadoras (Completada ✅)
 
 ### 3.1 Mean Reversion — Refinar
 - **Actual**: RSI <25 compra, RSI >50 venta
@@ -177,31 +177,61 @@ time_filter:schedule   → horarios auto-calculados
 
 ---
 
-## Fase 4: Integración Freqtrade (Semana 2)
+## Fase 4: Integración Freqtrade (Implementada ✅)
 
 ### Por qué Freqtrade
 - Hyperparameter optimization avanzado (Bayesian, genetic algorithms)
 - Exchange integration real (Binance, Kraken, etc.)
 - Dry-run mode para paper trading
 - Comunidad activa + plugins
-- Stoploss personalizado trailing
+- Stoploss personalizado trailing + ATR dinámico
 
-### 4.1 Instalar Freqtrade como container Docker
-- Freqtrade tiene imagen oficial: `freqtradeorg/freqtrade`
-- Configurar exchange: Binance (paper trading)
-- Sincronizar pares: TOP 20
-- **Resultado**: Freqtrade como motor de backtesting/hyperopt principal
+### 4.1 Instalar Freqtrade como container Docker ✅
+- **Archivos creados**:
+  - `services/freqtrade/config.json` — dry-run, Binance, TOP 20 pares, 5m, API server en puerto 8080
+  - `services/freqtrade/config-swing.json` — same pero con timeframe 1h
+- **Contenedores en docker-compose.yml**:
+  - `freqtrade-meanrev` — MeanReversion strategy, 5m, API :8081
+  - `freqtrade-lowfreq` — LowFrequency strategy, 5m, API :8082, max 1 trade/día
+  - `freqtrade-swing` — SwingStrategy, 1h, API :8083
+- **Volúmenes**: `freqtrade_data_*` para datos históricos persistentes
 
-### 4.2 Migrar estrategias ganadoras a Freqtrade
-- Reescribir Mean Reversion y Low-Frequency como Freqtrade strategies
-- Usar freqtrade's populate_indicators() + populate_buy_trend()
-- Mantener vectorbt para sweep rápido, Freqtrade para optimización profunda
-- **Resultado**: Estrategias testeados con Freqtrade's hyperopt
+### 4.2 Migrar estrategias ganadoras a Freqtrade ✅
+- **`MeanReversion.py`**: 
+  - Score-based sistema (RSI + MACD + BB squeeze + EMA + volume)
+  - Parámetros hyperoptables: RSI thresholds, BB position, min_score
+  - BB squeeze detection (width < 2%) duplica peso de señal
+  - Volume confirmation bidireccional
+  - R:R = 1.67:1 (TP=3.0 ATR, SL=2.5% fijo con trailing)
+  - max_open_trades=3, timeframe=5m
 
-### 4.3 Conectar Freqtrade con nuestro orchestrator
-- Freqtrade genera señales → Redis stream → Risk manager → Paper trading
-- O usar Freqtrade's dry-run mode directamente
-- **Resultado**: Mejores señales + mejor gestión de riesgo
+- **`LowFrequency.py`**:
+  - Misma lógica base que MeanReversion pero más estricta
+  - Higher min_score (5), más exigente en condiciones
+  - `confirm_trade_entry()` garantiza máximo 1 trade/día
+  - max_open_trades=1
+
+- **`SwingStrategy.py`**:
+  - EMA alignment (EMA9 > EMA21 > EMA50) como señal principal
+  - custom_stoploss() con ATR dinámico
+  - timeframe=1h, max_open_trades=2
+
+### 4.3 Conectar Freqtrade con nuestro orchestrator ✅
+- **`services/freqtrade-bridge/main.py`**:
+  - Lee REST API de las 3 instancias Freqtrade cada 30s
+  - Publica portfolio snapshots → `paper_trading:freqtrade-*`
+  - Publica trades cerrados → `trade:results` stream
+  - Hyperopt monitor: detecta resultados en Redis (`freqtrade:hyperopt:*`) y actualiza `strategy:params:*`
+  - Dashboard integrado (3 instancias Freqtrade en `/api/portfolios`)
+
+- **Arquitectura de datos**:
+  ```
+  Freqtrade (dry-run) → REST API → bridge → Redis → Dashboard
+                                              ↓
+                                        trade:results
+                                              ↓
+                                        Our pipeline (estadísticas)
+  ```
 
 ---
 
@@ -286,7 +316,7 @@ time_filter:schedule   → horarios auto-calculados
 | COMPLETADO | Regime Detector | Sprint 3 | Contexto de mercado |
 | COMPLETADO | Fine-tuning Pipeline | Sprint 3 | Aprendizaje continuo |
 | COMPLETADO | LLM Graceful Degradation | Sprint 3 | Estabilidad GPU |
-| MEDIA | Freqtrade integration | Semana 4 | Hyperopt avanzado |
+| COMPLETADO | Freqtrade integration | Semana 4 | Hyperopt avanzado + dry-run |
 | MEDIA | Real exchange dry-run | Semana 4 | Validación real |
 | BAJA | Jesse MCP development | Semana 5 | AI strategies |
 | BAJA | Hummingbot market making | Semana 6 | Ingresos por fees |
@@ -334,8 +364,39 @@ docker compose exec timescaledb psql -U trader -d trader -c "
     ROUND(SUM(pnl_usd)::numeric, 2) as pnl
   FROM trades WHERE status = 'closed' 
   GROUP BY strategy ORDER BY pnl DESC;"
+
+# Freqtrade commands
+docker compose logs -f --tail=50 freqtrade-meanrev
+docker compose logs -f --tail=50 freqtrade-bridge
+curl -s http://localhost:8081/api/v1/status -u trader:trader123 | python3 -m json.tool
+curl -s http://localhost:8082/api/v1/balance -u trader:trader123 | python3 -m json.tool
+curl -s http://localhost:8083/api/v1/profit -u trader:trader123 | python3 -m json.tool
+
+# Freqtrade hyperopt (exec inside container)
+docker compose exec freqtrade-meanrev freqtrade hyperopt --strategy MeanReversion --config /freqtrade/user_data/config.json --epochs 100 --spaces buy sell
+
+# Aplicar resultados de hyperopt manualmente (bridge lo hace automático si pones en Redis)
+redis-cli SET "freqtrade:hyperopt:freqtrade-meanrev" '{"rsi_oversold_strong": 22, "atr_tp_multiplier": 3.0}'
+
+# Ver portfolios de Freqtrade en dashboard
+curl -s http://localhost:8001/api/portfolios | python3 -m json.tool | grep -A5 freqtrade
 ```
 
 ---
 
-**Próxima revisión:** 2026-06-19 12:00 (24h)
+**Próxima revisión:** 2026-06-24 12:00
+
+---
+
+## Modo Mock (sin Exchange Real)
+
+Si no tienes acceso a una cuenta de exchange, el sistema funciona en **mock mode**:
+
+- **`services/market-scanner/mock_scanner.py`**: Genera datos OHLCV sintéticos con random walk
+- Precios iniciales realistas (BTC ~$62K, ETH ~$3.4K, etc.)
+- Velocidades y volúmenes realistas por par y timeframe
+- Misma salida que el scanner real (`market:data`, `market:indicators`)
+- Almacena en TimescaleDB para backtesting
+- Controlado por `MOCK_MODE=true` en `.env`
+
+**Para volver a exchange real**: cambiar `MOCK_MODE=false` en `.env` y tener credenciales de exchange válidas.

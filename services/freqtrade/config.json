@@ -1,0 +1,58 @@
+{
+    "max_open_trades": 3,
+    "stake_currency": "USDT",
+    "stake_amount": "unlimited",
+    "tradable_balance_ratio": 0.99,
+    "dry_run": true,
+    "dry_run_wallet": 1000.0,
+    "canceled_timeout_seconds": 300,
+    "timeframe": "5m",
+    "futures": false,
+    "exchange": {
+        "name": "binance",
+        "pair_whitelist": [
+            "BTC/USDT", "ETH/USDT", "BNB/USDT", "XRP/USDT", "SOL/USDT",
+            "ADA/USDT", "DOGE/USDT", "AVAX/USDT", "DOT/USDT", "LINK/USDT",
+            "LTC/USDT", "ATOM/USDT", "UNI/USDT", "NEAR/USDT", "APT/USDT",
+            "ARB/USDT", "OP/USDT", "FIL/USDT", "SUI/USDT", "PEPE/USDT"
+        ],
+        "ccxt_config": {
+            "enableRateLimit": true
+        }
+    },
+    "pairlists": [
+        {"method": "StaticPairList"}
+    ],
+    "telegram": {
+        "enabled": false
+    },
+    "api_server": {
+        "enabled": true,
+        "listen_ip_address": "0.0.0.0",
+        "listen_port": 8080,
+        "username": "trader",
+        "password": "trader123"
+    },
+    "bot_name": "freqtrade-meanrev",
+    "initial_state": "running",
+    "force_entry_enable": true,
+    "internals": {
+        "process_throttle_secs": 5
+    },
+    "unfilledtimeout": {
+        "entry": 30,
+        "exit": 30,
+        "exit_timeout_count": 0,
+        "unit": "minutes"
+    },
+    "entry_pricing": {
+        "price_side": "same",
+        "use_order_book": false,
+        "price_last_balance": 0.0
+    },
+    "exit_pricing": {
+        "price_side": "same",
+        "use_order_book": false,
+        "price_last_balance": 0.0
+    }
+}

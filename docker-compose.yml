@@ -46,6 +46,7 @@ services:
       DB_USER: ${TIMESCALE_USER:-trader}
       DB_PASSWORD: ${TIMESCALE_PASSWORD:-trader123}
       EXCHANGE: ${EXCHANGE:-binance}
+      MOCK_MODE: ${MOCK_MODE:-true}
     depends_on:
       redis:
         condition: service_healthy
@@ -438,7 +439,7 @@ services:
       PT_INSTANCE: lowfreq
       PT_STATE_KEY: paper_trading:lowfreq
       PT_STATS_KEY: portfolio:stats:lowfreq
-      PT_MAX_TRADES_PER_DAY: "3"
+      PT_MAX_TRADES_PER_DAY: "1"
       PT_MIN_CONFIDENCE: "0.70"
       PT_MAX_POSITION_PCT: "0.30"
     depends_on:
@@ -653,7 +654,7 @@ services:
       PT_INSTANCE: lowfreq-tf
       PT_STATE_KEY: paper_trading:lowfreq-tf
       PT_STATS_KEY: portfolio:stats:lowfreq-tf
-      PT_MAX_TRADES_PER_DAY: "5"
+      PT_MAX_TRADES_PER_DAY: "1"
       PT_MIN_CONFIDENCE: "0.70"
       PT_TIME_FILTER: "5,6,8,17,22"
     depends_on:
@@ -1091,6 +1092,120 @@ services:
     networks:
       - trader-net
 
+  freqtrade-meanrev:
+    image: freqtradeorg/freqtrade:stable
+    ports:
+      - "8081:8080"
+    volumes:
+      - ./services/freqtrade:/freqtrade/user_data
+      - freqtrade_data_meanrev:/freqtrade/user_data/data
+    command: >
+      trade --dry-run
+      --strategy MeanReversion
+      --config /freqtrade/user_data/config.json
+      --db-url sqlite:////freqtrade/user_data/trades_meanrev.sqlite
+    depends_on:
+      - redis
+    restart: unless-stopped
+    networks:
+      - trader-net
+    profiles: ["disabled"]
+
+  freqtrade-lowfreq:
+    image: freqtradeorg/freqtrade:stable
+    ports:
+      - "8082:8080"
+    volumes:
+      - ./services/freqtrade:/freqtrade/user_data
+      - freqtrade_data_lowfreq:/freqtrade/user_data/data
+    command: >
+      trade --dry-run
+      --strategy LowFrequency
+      --config /freqtrade/user_data/config.json
+      --db-url sqlite:////freqtrade/user_data/trades_lowfreq.sqlite
+    depends_on:
+      - redis
+    restart: unless-stopped
+    networks:
+      - trader-net
+    profiles: ["disabled"]
+
+  freqtrade-swing:
+    image: freqtradeorg/freqtrade:stable
+    ports:
+      - "8083:8080"
+    volumes:
+      - ./services/freqtrade:/freqtrade/user_data
+      - freqtrade_data_swing:/freqtrade/user_data/data
+    command: >
+      trade --dry-run
+      --strategy SwingStrategy
+      --config /freqtrade/user_data/config-swing.json
+      --db-url sqlite:////freqtrade/user_data/trades_swing.sqlite
+    depends_on:
+      - redis
+    restart: unless-stopped
+    networks:
+      - trader-net
+    profiles: ["disabled"]
+
+  freqtrade-bridge:
+    build:
+      context: ./services/freqtrade-bridge
+    environment:
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      FREQTRADE_MEANREV_URL: http://freqtrade-meanrev:8080
+      FREQTRADE_LOWFREQ_URL: http://freqtrade-lowfreq:8080
+      FREQTRADE_SWING_URL: http://freqtrade-swing:8080
+      POLL_INTERVAL: "30"
+    depends_on:
+      - redis
+      - freqtrade-meanrev
+      - freqtrade-lowfreq
+      - freqtrade-swing
+    restart: unless-stopped
+    networks:
+      - trader-net
+    profiles: ["disabled"]
+
+  nautilus-bridge:
+    build:
+      context: ./services/nautilus-bridge
+    environment:
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      DB_HOST: timescaledb
+      DB_PORT: 5432
+      DB_NAME: trader
+      DB_USER: trader
+      DB_PASSWORD: trader123
+      NAUTILUS_ENABLED: "true"
+    depends_on:
+      - redis
+      - timescaledb
+    restart: unless-stopped
+    networks:
+      - trader-net
+    profiles: ["nautilus"]
+
+  swarm-coordinator:
+    build:
+      context: ./services/swarm-coordinator
+    environment:
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      OLLAMA_HOST: ${OLLAMA_HOST:-http://host.docker.internal:11434}
+      OLLAMA_MODEL: gemma3:4b
+    depends_on:
+      - redis
+    restart: unless-stopped
+    networks:
+      - trader-net
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    profiles: ["swarm"]
+
 volumes:
   redis_data:
   timescale_data:
@@ -1099,6 +1214,9 @@ volumes:
   evolution_data:
   grafana_data:
   monitoring_logs:
+  freqtrade_data_meanrev:
+  freqtrade_data_lowfreq:
+  freqtrade_data_swing:
 
 networks:
   trader-net:

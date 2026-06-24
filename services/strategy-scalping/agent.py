@@ -11,6 +11,7 @@ sys.path.insert(0, "/app")
 from shared.config import settings
 from shared.redis_client import RedisClient
 from shared.models import TechnicalIndicators, TradingSignal, SignalType
+from shared.alpha_zoo.integration import AlphaIntegration
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(name)s] %(levelname)s: %(message)s")
 logger = logging.getLogger("strategy-scalping")
@@ -24,10 +25,12 @@ class ScalpingAgent:
         self.running = False
         self.qwen_url = settings.QWEN_ANALYZER_URL
         self.params: dict = {}
+        self.alpha = AlphaIntegration()
 
     async def initialize(self):
         self.redis = await RedisClient.get_instance()
         await self.load_params()
+        await self.alpha.ensure_db()
         logger.info("Scalping agent initialized")
 
     async def load_params(self):
@@ -37,9 +40,11 @@ class ScalpingAgent:
             "rsi_oversold_strong": 25, "rsi_oversold_weak": 35,
             "rsi_overbought_strong": 75, "rsi_overbought_weak": 65,
             "bb_position_low": 0.15, "bb_position_high": 0.85,
-            "atr_tp_multiplier": 2.0, "atr_sl_multiplier": 1.5,
+            "bb_squeeze_threshold": 2.0,
+            "atr_tp_multiplier": 3.0, "atr_sl_multiplier": 1.8,
             "min_confidence": 0.4, "min_score": 3,
             "active": True, "cooldown_seconds": 900, "confidence_weight": 1.0,
+            "alpha_zoo_enabled": True, "alpha_zoo_weight": 0.3, "alpha_zoo_timeframe": "5m",
         }
         self.params = {**defaults, **(stored or {}), **(config or {})}
         logger.info(f"Scalping params loaded: sl_mult={self.params['atr_sl_multiplier']} tp_mult={self.params['atr_tp_multiplier']}")
@@ -71,15 +76,20 @@ class ScalpingAgent:
                 score -= 1
                 reasons.append("MACD bearish crossover")
 
+        bb_squeeze = False
         if ind.bb_upper is not None and ind.bb_lower is not None and ind.bb_middle is not None:
             bb_range = ind.bb_upper - ind.bb_lower
-            if bb_range > 0:
+            if bb_range > 0 and ind.bb_middle > 0:
                 pos = (ind.close - ind.bb_lower) / bb_range
+                bb_width_pct = bb_range / ind.bb_middle * 100
+                if bb_width_pct < p["bb_squeeze_threshold"]:
+                    bb_squeeze = True
+                    reasons.append(f"BB squeeze ({bb_width_pct:.1f}%)")
                 if pos < p["bb_position_low"]:
-                    score += 1
+                    score += 2 if bb_squeeze else 1
                     reasons.append(f"Price near lower BB ({pos:.2f})")
                 elif pos > p["bb_position_high"]:
-                    score -= 1
+                    score -= 2 if bb_squeeze else 1
                     reasons.append(f"Price near upper BB ({pos:.2f})")
 
         if ind.ema_9 is not None and ind.ema_21 is not None:
@@ -91,7 +101,10 @@ class ScalpingAgent:
                 reasons.append("EMA9 < EMA21 (short-term downtrend)")
 
         if ind.volume_change_pct is not None and ind.volume_change_pct > 50:
-            score += 1 if score > 0 else 0
+            if score > 0:
+                score += 2 if bb_squeeze else 1
+            elif score < 0:
+                score -= 2 if bb_squeeze else 1
             reasons.append(f"Volume spike ({ind.volume_change_pct:.0f}%)")
 
         if ind.atr_14 is not None:
@@ -162,6 +175,30 @@ class ScalpingAgent:
                 return
 
             tech_result = self.evaluate_technicals(ind)
+
+            if self.params.get("alpha_zoo_enabled", True):
+                await self.alpha.ensure_scores(self.params.get("alpha_zoo_timeframe", "5m"))
+                blended_score, alpha_note = self.alpha.blend(
+                    tech_result["technical_score"],
+                    ind.symbol,
+                    weight=self.params.get("alpha_zoo_weight", 0.3),
+                )
+                if alpha_note:
+                    tech_result["technical_score"] = blended_score
+                    tech_result["alpha_score"] = self.alpha.get_alpha_score(ind.symbol)
+                    tech_result["reasoning"] += f" | {alpha_note}"
+                    score = blended_score
+                    if score >= self.params["min_score"]:
+                        tech_result["signal"] = SignalType.BUY
+                        tech_result["confidence"] = min(0.95, 0.5 + score * 0.1) * self.params["confidence_weight"]
+                        tech_result["confidence"] *= 1.0 + abs(self.alpha.get_alpha_score(ind.symbol)) * 0.05
+                    elif score <= -self.params["min_score"]:
+                        tech_result["signal"] = SignalType.SELL
+                        tech_result["confidence"] = min(0.95, 0.5 + abs(score) * 0.1) * self.params["confidence_weight"]
+                        tech_result["confidence"] *= 1.0 + abs(self.alpha.get_alpha_score(ind.symbol)) * 0.05
+                    else:
+                        tech_result["signal"] = SignalType.HOLD
+                    tech_result["confidence"] = min(0.95, tech_result["confidence"])
 
             if tech_result["signal"] == SignalType.HOLD:
                 return
@@ -241,6 +278,8 @@ class ScalpingAgent:
                 reload_counter += 1
                 if reload_counter % 100 == 0:
                     await self.load_params()
+                if reload_counter % 50 == 0 and self.params.get("alpha_zoo_enabled", True):
+                    asyncio.create_task(self.alpha.ensure_scores(self.params.get("alpha_zoo_timeframe", "5m")))
             except asyncio.CancelledError:
                 break
             except Exception as e:

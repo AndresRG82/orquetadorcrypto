@@ -60,5 +60,7 @@ class Settings:
         "1h": 200, "4h": 200, "1d": 200, "1w": 100,
     }
 
+    NAUTILUS_ENABLED: bool = os.getenv("NAUTILUS_ENABLED", "false").lower() == "true"
+
 
 settings = Settings()

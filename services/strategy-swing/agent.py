@@ -11,6 +11,7 @@ sys.path.insert(0, "/app")
 from shared.config import settings
 from shared.redis_client import RedisClient
 from shared.models import TechnicalIndicators, TradingSignal, SignalType
+from shared.alpha_zoo.integration import AlphaIntegration
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(name)s] %(levelname)s: %(message)s")
 logger = logging.getLogger("strategy-swing")
@@ -24,10 +25,12 @@ class SwingAgent:
         self.running = False
         self.qwen_url = settings.QWEN_ANALYZER_URL
         self.params: dict = {}
+        self.alpha = AlphaIntegration()
 
     async def initialize(self):
         self.redis = await RedisClient.get_instance()
         await self.load_params()
+        await self.alpha.ensure_db()
         logger.info("Swing agent initialized")
 
     async def load_params(self):
@@ -38,8 +41,9 @@ class SwingAgent:
             "rsi_overbought_deep": 80, "rsi_overbought": 70, "rsi_overbought_weak": 60,
             "bb_position_low": 0.1, "bb_position_high": 0.9,
             "atr_tp_multiplier": 3.0, "atr_sl_multiplier": 1.5,
-            "min_confidence": 0.45, "min_score_strong": 4, "min_score_weak": 2,
+            "min_confidence": 0.55, "min_score_strong": 5, "min_score_weak": 3,
             "active": True, "cooldown_seconds": 3600, "confidence_weight": 1.0,
+            "alpha_zoo_enabled": True, "alpha_zoo_weight": 0.3, "alpha_zoo_timeframe": "1h",
         }
         self.params = {**defaults, **(stored or {}), **(config or {})}
         logger.info(f"Swing params loaded: sl_mult={self.params['atr_sl_multiplier']} tp_mult={self.params['atr_tp_multiplier']}")
@@ -169,8 +173,38 @@ class SwingAgent:
 
             tech_result = self.evaluate_technicals(ind)
 
+            if self.params.get("alpha_zoo_enabled", True):
+                await self.alpha.ensure_scores(self.params.get("alpha_zoo_timeframe", "1h"))
+                blended_score, alpha_note = self.alpha.blend(
+                    tech_result["technical_score"],
+                    ind.symbol,
+                    weight=self.params.get("alpha_zoo_weight", 0.3),
+                )
+                if alpha_note:
+                    tech_result["technical_score"] = blended_score
+                    tech_result["reasoning"] += f" | {alpha_note}"
+                    score = blended_score
+                    p = self.params
+                    if score >= p["min_score_strong"]:
+                        tech_result["signal"] = SignalType.BUY
+                        tech_result["confidence"] = min(0.95, 0.5 + score * 0.08) * p["confidence_weight"]
+                    elif score >= p["min_score_weak"]:
+                        tech_result["signal"] = SignalType.BUY
+                        tech_result["confidence"] = (0.45 + score * 0.05) * p["confidence_weight"]
+                    elif score <= -p["min_score_strong"]:
+                        tech_result["signal"] = SignalType.SELL
+                        tech_result["confidence"] = min(0.95, 0.5 + abs(score) * 0.08) * p["confidence_weight"]
+                    elif score <= -p["min_score_weak"]:
+                        tech_result["signal"] = SignalType.SELL
+                        tech_result["confidence"] = (0.45 + abs(score) * 0.05) * p["confidence_weight"]
+                    else:
+                        tech_result["signal"] = SignalType.HOLD
+                    tech_result["confidence"] = min(0.95, max(0.0, tech_result["confidence"]))
+
             if tech_result["signal"] == SignalType.HOLD:
                 return
+
+            logger.info(f"EVAL: {tech_result['signal'].value} {ind.symbol} {ind.timeframe} score={tech_result['technical_score']} conf={tech_result['confidence']:.2f}")
 
             target, stop = self.calculate_targets(ind, tech_result["signal"])
 
@@ -245,6 +279,8 @@ class SwingAgent:
                 reload_counter += 1
                 if reload_counter % 100 == 0:
                     await self.load_params()
+                if reload_counter % 50 == 0 and self.params.get("alpha_zoo_enabled", True):
+                    asyncio.create_task(self.alpha.ensure_scores(self.params.get("alpha_zoo_timeframe", "1h")))
             except asyncio.CancelledError:
                 break
             except Exception as e:

@@ -12,6 +12,7 @@ sys.path.insert(0, "/app")
 from shared.config import settings
 from shared.redis_client import RedisClient
 from shared.db import Database
+from shared.attribution import run_full_attribution
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(name)s] %(levelname)s: %(message)s")
 logger = logging.getLogger("backtesting")
@@ -153,11 +154,11 @@ class BacktestEngine:
 
         return buy_signal.fillna(False), sell_signal.fillna(False)
 
-    def run_vectorbt_backtest(self, df: pd.DataFrame, strategy: str, params: dict, initial_capital: float = 1000.0, df_htf: Optional[pd.DataFrame] = None) -> dict:
+    def run_vectorbt_backtest(self, df: pd.DataFrame, strategy: str, params: dict, initial_capital: float = 1000.0, df_htf: Optional[pd.DataFrame] = None) -> tuple[dict, Optional[pd.Series]]:
         buy_signal, sell_signal = self.compute_signals(df, strategy, params, df_htf=df_htf)
 
         if buy_signal.sum() == 0 and sell_signal.sum() == 0:
-            return {"strategy": strategy, "total_trades": 0, "message": "No signals generated"}
+            return {"strategy": strategy, "total_trades": 0, "message": "No signals generated"}, None
 
         atr_sl = params.get("atr_sl_multiplier", 1.5)
         atr_tp = params.get("atr_tp_multiplier", 3.0)
@@ -201,7 +202,7 @@ class BacktestEngine:
             "profit_factor": profit_factor,
             "max_drawdown_pct": max_dd,
             "sharpe_ratio": sharpe,
-        }
+        }, portfolio.returns()
 
     def run_vectorbt_sweep(self, df: pd.DataFrame, strategy: str, param_grid: dict, initial_capital: float = 1000.0) -> list[dict]:
         if not VBT_AVAILABLE:
@@ -218,7 +219,7 @@ class BacktestEngine:
         for combo in all_combos:
             params = dict(zip(keys, combo))
             try:
-                result = self.run_vectorbt_backtest(df, strategy, params, initial_capital)
+                result, _ = self.run_vectorbt_backtest(df, strategy, params, initial_capital)
                 result["params"] = params
                 results.append(result)
             except Exception as e:
@@ -244,10 +245,18 @@ class BacktestEngine:
         if strategy in htf_map:
             df_htf = await self.fetch_ohlcv(symbol, htf_map[strategy], days)
 
-        result = self.run_vectorbt_backtest(df, strategy, params, initial_capital, df_htf=df_htf)
+        result, portfolio_returns = self.run_vectorbt_backtest(df, strategy, params, initial_capital, df_htf=df_htf)
         result["symbol"] = symbol
         result["timeframe"] = timeframe
         result["period_days"] = days
+
+        if portfolio_returns is not None and len(portfolio_returns) > 10:
+            benchmark_returns = df["close"].pct_change().dropna()
+            try:
+                attribution = run_full_attribution(portfolio_returns, benchmark_returns)
+                result["attribution"] = {k: v for k, v in attribution.items() if v}
+            except Exception as e:
+                logger.warning(f"Attribution failed: {e}")
 
         await self.redis.set_json(f"backtest:{strategy}:{symbol}:{timeframe}", result)
         logger.info(

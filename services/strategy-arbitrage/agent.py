@@ -12,6 +12,7 @@ sys.path.insert(0, "/app")
 from shared.config import settings
 from shared.redis_client import RedisClient
 from shared.models import TechnicalIndicators, TradingSignal, SignalType
+from shared.alpha_zoo.integration import AlphaIntegration
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(name)s] %(levelname)s: %(message)s")
 logger = logging.getLogger("strategy-arbitrage")
@@ -30,10 +31,12 @@ class ArbitrageAgent:
         self.latest_data: dict[str, dict[str, TechnicalIndicators]] = defaultdict(dict)
         self.qwen_url = settings.QWEN_ANALYZER_URL
         self.params: dict = {}
+        self.alpha = AlphaIntegration()
 
     async def initialize(self):
         self.redis = await RedisClient.get_instance()
         await self.load_params()
+        await self.alpha.ensure_db()
         logger.info("Arbitrage agent initialized (strict thresholds)")
 
     async def load_params(self):
@@ -46,6 +49,7 @@ class ArbitrageAgent:
             "bb_position_extreme_high": 0.95, "bb_position_extreme_low": 0.05,
             "atr_tp_multiplier": 2.5, "atr_sl_multiplier": 1.0,
             "active": True, "cooldown_seconds": 7200, "confidence_weight": 1.0,
+            "alpha_zoo_enabled": True, "alpha_zoo_weight": 0.3, "alpha_zoo_timeframe": "1h",
         }
         self.params = {**defaults, **(stored or {}), **(config or {})}
         logger.info(f"Arbitrage params loaded: bb_width={self.params['bb_width_threshold']} sl_mult={self.params['atr_sl_multiplier']}")
@@ -169,6 +173,15 @@ class ArbitrageAgent:
             if arb_result is None:
                 return
 
+            if self.params.get("alpha_zoo_enabled", True):
+                await self.alpha.ensure_scores(self.params.get("alpha_zoo_timeframe", "1h"))
+                alpha_score = self.alpha.get_alpha_score(ind.symbol)
+                if abs(alpha_score) > 0.01:
+                    alpha_boost = 1.0 + abs(alpha_score) * 0.05
+                    arb_result["confidence"] = min(0.95, arb_result["confidence"] * alpha_boost)
+                    direction = "bullish" if alpha_score > 0 else "bearish"
+                    arb_result["reasoning"] += f" | alpha_zoo={alpha_score:+.3f} ({direction})"
+
             if arb_result["confidence"] < self.params["min_confidence"]:
                 return
 
@@ -242,6 +255,8 @@ class ArbitrageAgent:
                 reload_counter += 1
                 if reload_counter % 100 == 0:
                     await self.load_params()
+                if reload_counter % 50 == 0 and self.params.get("alpha_zoo_enabled", True):
+                    asyncio.create_task(self.alpha.ensure_scores(self.params.get("alpha_zoo_timeframe", "1h")))
             except asyncio.CancelledError:
                 break
             except Exception as e:

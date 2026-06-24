@@ -10,6 +10,8 @@ from shared.config import settings
 from shared.redis_client import RedisClient
 from shared.db import Database
 
+NAUTILUS_ENABLED = settings.NAUTILUS_ENABLED
+
 app = FastAPI(title="CryptoTrader Dashboard", version="2.0.0")
 
 app.add_middleware(
@@ -86,15 +88,20 @@ async def root():
     <h2>Sentimiento de Mercado</h2>
     <table id="sentiment"><thead><tr><th>Indicador</th><th>Valor</th></tr></thead><tbody></tbody></table>
     <h2>Backtest</h2>
-    <table id="backtest"><thead><tr><th>Estrategia</th><th>Symbol</th><th>PnL</th><th>Win Rate</th><th>Sharpe</th><th>MaxDD</th><th>Trades</th></tr></thead><tbody></tbody></table>
+    <table id="backtest"><thead><tr><th>Estrategia</th><th>Symbol</th><th>PnL</th><th>Win Rate</th><th>Sharpe</th><th>Sortino</th><th>MaxDD</th><th>Trades</th><th>Beta</th><th>Trend</th></tr></thead><tbody></tbody></table>
     <h2>Evolution Agent</h2>
     <table id="evolution"><thead><tr><th>Indicador</th><th>Valor</th></tr></thead><tbody></tbody></table>
+    <h2>Nautilus vs VectorBT</h2>
+    <table id="nautilus"><thead><tr><th>Estrategia</th><th>Symbol</th><th>TF</th><th>Sharpe Nautilus</th><th>Sharpe VBT</th><th>Diff</th><th>PnL Nautilus</th><th>Trades Nautilus</th></tr></thead><tbody></tbody></table>
+    <h2>Swarm Coordinator</h2>
+    <table id="swarm"><thead><tr><th>Indicador</th><th>Valor</th></tr></thead><tbody></tbody></table>
     <script>
     async function loadData() {
         try {
-            const [statsRes, tradesRes, signalsRes, metricsRes, sentimentRes, backtestRes, evolutionRes] = await Promise.all([
+            const [statsRes, tradesRes, signalsRes, metricsRes, sentimentRes, backtestRes, evolutionRes, attributionRes, nautilusRes, swarmRes] = await Promise.all([
                 fetch('/api/stats'), fetch('/api/trades?limit=20'), fetch('/api/signals?limit=20'), fetch('/api/metrics'),
-                fetch('/api/sentiment'), fetch('/api/backtest'), fetch('/api/evolution')
+                fetch('/api/sentiment'), fetch('/api/backtest'), fetch('/api/evolution'),
+                fetch('/api/backtest/attribution'), fetch('/api/nautilus'), fetch('/api/swarm')
             ]);
             const stats = await statsRes.json();
             const trades = await tradesRes.json();
@@ -102,57 +109,26 @@ async def root():
             const metrics = await metricsRes.json();
             const sentiment = await sentimentRes.json();
             const backtest = await backtestRes.json();
+            const attribution = await attributionRes.json();
+            const nautilus = await nautilusRes.json();
+            const swarm = await swarmRes.json();
             const evolution = await evolutionRes.json();
 
-            const pnlClass = stats.total_pnl >= 0 ? 'positive' : 'negative';
-            const pnlPctClass = stats.total_pnl_pct >= 0 ? 'positive' : 'negative';
-            document.getElementById('stats').innerHTML = `
-                <div class="card"><div class="label">Valor Total</div><div class="value">$${stats.total_value?.toFixed(2) || '0.00'}</div></div>
-                <div class="card"><div class="label">Efectivo</div><div class="value">$${stats.cash?.toFixed(2) || '0.00'}</div></div>
-                <div class="card"><div class="label">PnL Total</div><div class="value ${pnlClass}">$${stats.total_pnl?.toFixed(2) || '0.00'}</div></div>
-                <div class="card"><div class="label">PnL %</div><div class="value ${pnlPctClass}">${stats.total_pnl_pct?.toFixed(1) || '0.0'}%</div></div>
-                <div class="card"><div class="label">Trades</div><div class="value">${stats.total_trades || 0}</div></div>
-                <div class="card"><div class="label">Win Rate</div><div class="value">${stats.win_rate?.toFixed(1) || '0.0'}%</div></div>
-                <div class="card"><div class="label">Posiciones</div><div class="value">${stats.open_positions || 0}</div></div>
-                <div class="card"><div class="label">Fees</div><div class="value negative">$${stats.total_fees?.toFixed(2) || '0.00'}</div></div>
-            `;
-
-            if (stats.positions && Object.keys(stats.positions).length > 0) {
-                const rows = Object.entries(stats.positions).map(([id, p]) => {
-                    const pnlClass2 = (p.unrealized_pnl || 0) >= 0 ? 'positive' : 'negative';
-                    return `<tr><td>${p.symbol}</td><td class="${p.side}">${p.side}</td><td>${parseFloat(p.quantity).toFixed(6)}</td><td>$${parseFloat(p.entry_price).toFixed(2)}</td><td class="${pnlClass2}">$${(p.unrealized_pnl || 0).toFixed(2)}</td><td>${p.strategy || '-'}</td></tr>`;
-                }).join('');
-                document.querySelector('#positions tbody').innerHTML = rows;
-            } else {
-                document.querySelector('#positions tbody').innerHTML = '<tr><td colspan="6" style="text-align:center;color:#888">Sin posiciones</td></tr>';
+            const attrMap = {};
+            if (attribution && attribution.results) {
+                attribution.results.forEach(a => {
+                    const key = a.strategy + '|' + a.symbol;
+                    attrMap[key] = a.attribution_summary || {};
+                });
             }
-
-            document.querySelector('#trades tbody').innerHTML = trades.length > 0
-                ? trades.map(t => `<tr><td>${new Date(t.time).toLocaleString()}</td><td>${t.symbol}</td><td class="${t.side}">${t.side}</td><td class="${t.pnl_usd >= 0 ? 'positive' : 'negative'}">$${t.pnl_usd?.toFixed(2)}</td><td>${t.strategy || '-'}</td><td>${t.status}</td></tr>`).join('')
-                : '<tr><td colspan="6" style="text-align:center;color:#888">Sin operaciones</td></tr>';
-
-            document.querySelector('#signals tbody').innerHTML = signals.length > 0
-                ? signals.map(s => `<tr><td>${new Date(s.time).toLocaleString()}</td><td>${s.symbol}</td><td class="${s.signal}">${s.signal}</td><td>${(s.confidence * 100).toFixed(0)}%</td><td>${s.strategy || '-'}</td></tr>`).join('')
-                : '<tr><td colspan="5" style="text-align:center;color:#888">Sin senales</td></tr>';
-
-            document.querySelector('#metrics tbody').innerHTML = metrics.length > 0
-                ? metrics.map(m => `<tr><td>${m.strategy}</td><td>${m.total_trades}</td><td>${m.win_rate.toFixed(1)}%</td><td class="${m.total_pnl >= 0 ? 'positive' : 'negative'}">$${m.total_pnl.toFixed(2)}</td><td>$${m.avg_pnl.toFixed(2)}</td></tr>`).join('')
-                : '<tr><td colspan="5" style="text-align:center;color:#888">Sin datos</td></tr>';
-
-            const sentRows = [];
-            if (sentiment.fear_greed) sentRows.push(`<tr><td>Fear & Greed</td><td>${sentiment.fear_greed.value} (${sentiment.fear_greed.classification})</td></tr>`);
-            if (sentiment.sentiment) sentRows.push(`<tr><td>Sentimiento</td><td>${sentiment.sentiment.sentiment_signal} (ajuste: ${sentiment.sentiment.confidence_adjustment})</td></tr>`);
-            if (sentiment.funding_rates) {
-                const rates = Object.entries(sentiment.funding_rates).map(([s,r]) => `${s}: ${r.toFixed(4)}%`).join(', ');
-                sentRows.push(`<tr><td>Funding Rates</td><td>${rates}</td></tr>`);
-            }
-            if (sentiment.sentiment && sentiment.sentiment.reasoning) sentRows.push(`<tr><td>Razonamiento</td><td>${sentiment.sentiment.reasoning}</td></tr>`);
-            document.querySelector('#sentiment tbody').innerHTML = sentRows.length > 0 ? sentRows.join('') : '<tr><td colspan="2" style="text-align:center;color:#888">Sin datos de sentimiento</td></tr>';
 
             const btResults = backtest.results || [];
             document.querySelector('#backtest tbody').innerHTML = btResults.length > 0
-                ? btResults.map(b => `<tr><td>${b.strategy}</td><td>${b.symbol}</td><td class="${(b.total_pnl||0)>=0?'positive':'negative'}">$${(b.total_pnl||0).toFixed(2)}</td><td>${(b.win_rate||0).toFixed(1)}%</td><td>${(b.sharpe_ratio||0).toFixed(2)}</td><td>${(b.max_drawdown_pct||0).toFixed(1)}%</td><td>${b.total_trades||0}</td></tr>`).join('')
-                : '<tr><td colspan="7" style="text-align:center;color:#888">Sin resultados de backtest</td></tr>';
+                ? btResults.map(b => {
+                    const attr = attrMap[b.strategy + '|' + b.symbol] || {};
+                    return `<tr><td>${b.strategy}</td><td>${b.symbol}</td><td class="${(b.total_pnl||0)>=0?'positive':'negative'}">$${(b.total_pnl||0).toFixed(2)}</td><td>${(b.win_rate||0).toFixed(1)}%</td><td>${(b.sharpe_ratio||0).toFixed(2)}</td><td>${attr.sortino !== undefined ? attr.sortino.toFixed(2) : '-'}</td><td>${(b.max_drawdown_pct||0).toFixed(1)}%</td><td>${b.total_trades||0}</td><td>${attr.benchmark_beta !== undefined ? attr.benchmark_beta.toFixed(2) : '-'}</td><td>${attr.current_trend || '-'}</td></tr>`;
+                }).join('')
+                : '<tr><td colspan="10" style="text-align:center;color:#888">Sin resultados de backtest</td></tr>';
 
             const evoRows = [];
             const lc = evolution.last_cycle;
@@ -178,6 +154,23 @@ async def root():
                 });
             }
             document.querySelector('#evolution tbody').innerHTML = evoRows.length > 0 ? evoRows.join('') : '<tr><td colspan="2" style="text-align:center;color:#888">Sin datos de evolution</td></tr>';
+
+            const nautRows = (nautilus.results || []).map(r => {
+                const c = r.comparison || {};
+                return `<tr><td>${r.nautilus?.strategy || '-'}</td><td>${r.nautilus?.symbol || '-'}</td><td>${r.nautilus?.timeframe || '-'}</td><td>${(c.sharpe_nautilus || 0).toFixed(2)}</td><td>${(c.sharpe_vectorbt || 0).toFixed(2)}</td><td class="${(c.sharpe_diff||0)>=0?'positive':'negative'}">${(c.sharpe_diff||0).toFixed(2)}</td><td class="${(c.pnl_nautilus||0)>=0?'positive':'negative'}">$${(c.pnl_nautilus||0).toFixed(2)}</td><td>${c.trades_nautilus || 0}</td></tr>`;
+            }).join('');
+            document.querySelector('#nautilus tbody').innerHTML = nautRows || '<tr><td colspan="8" style="text-align:center;color:#888">Sin datos Nautilus</td></tr>';
+
+            const swarmRows = swarm.timestamp ? [
+                `<tr><td>Market Outlook</td><td class="${swarm.market_outlook==='alcista'?'positive':swarm.market_outlook==='bajista'?'negative':'hold'}">${swarm.market_outlook || '-'}</td></tr>`,
+                `<tr><td>Confianza</td><td>${(swarm.confidence_adjustment || 1.0).toFixed(2)}x</td></tr>`,
+                `<tr><td>Riesgo</td><td>${swarm.risk_adjustment || '-'}</td></tr>`,
+                `<tr><td>Kelly</td><td>${(swarm.kelly_fraction_suggested || 0).toFixed(2)}</td></tr>`,
+                `<tr><td>Ajustes</td><td>${swarm.param_adjustments || '-'}</td></tr>`,
+                `<tr><td>Razonamiento</td><td>${swarm.reasoning || '-'}</td></tr>`,
+                `<tr><td>Ultima actualizacion</td><td>${swarm.timestamp ? new Date(swarm.timestamp).toLocaleString() : '-'}</td></tr>`
+            ].join('') : '<tr><td colspan="2" style="text-align:center;color:#888">Sin datos del Swarm</td></tr>';
+            document.querySelector('#swarm tbody').innerHTML = swarmRows;
         } catch(e) {
             document.getElementById('stats').innerHTML = '<div class="card" style="color:#ff4757">Error: ' + e.message + '</div>';
         }
@@ -228,6 +221,10 @@ INSTANCES = {
     "multitf-tf": {"state": "paper_trading:multitf-tf", "stats": "portfolio:stats:multitf-tf", "label": "MultiTF + TimeFilter"},
     "lowfreq-tf": {"state": "paper_trading:lowfreq-tf", "stats": "portfolio:stats:lowfreq-tf", "label": "LowFreq + TimeFilter"},
     "sentiment-tf": {"state": "paper_trading:sentiment-tf", "stats": "portfolio:stats:sentiment-tf", "label": "Sentiment + TimeFilter"},
+    # Freqtrade instances
+    "freqtrade-meanrev": {"state": "paper_trading:freqtrade-meanrev", "stats": "portfolio:stats:freqtrade-meanrev", "label": "Freqtrade MeanReversion"},
+    "freqtrade-lowfreq": {"state": "paper_trading:freqtrade-lowfreq", "stats": "portfolio:stats:freqtrade-lowfreq", "label": "Freqtrade LowFrequency"},
+    "freqtrade-swing": {"state": "paper_trading:freqtrade-swing", "stats": "portfolio:stats:freqtrade-swing", "label": "Freqtrade Swing"},
 }
 
 
@@ -398,6 +395,38 @@ async def get_backtest():
 @app.post("/api/backtest/run")
 async def run_backtest(strategy: str = Query(default="all"), symbol: str = Query(default="BTC/USDT"), days: int = Query(default=30)):
     return {"message": "Backtest runs automatically every 6 hours. Check /api/backtest for results."}
+
+
+@app.get("/api/backtest/attribution")
+async def get_backtest_attribution(strategy: str = Query(default=""), symbol: str = Query(default="")):
+    try:
+        latest = await redis.get_json("backtest:latest")
+        if not latest or "results" not in latest:
+            return {"message": "No backtest results yet"}
+        results = latest["results"]
+        if strategy:
+            results = [r for r in results if r.get("strategy") == strategy]
+        if symbol:
+            results = [r for r in results if r.get("symbol") == symbol]
+        enriched = []
+        for r in results:
+            entry = {k: v for k, v in r.items() if k != "attribution"}
+            entry["has_attribution"] = "attribution" in r and bool(r["attribution"])
+            enriched.append(entry)
+            if entry["has_attribution"]:
+                entry["attribution_summary"] = {
+                    "sharpe": r["attribution"].get("stats", {}).get("sharpe_ratio"),
+                    "sortino": r["attribution"].get("stats", {}).get("sortino_ratio"),
+                    "calmar": r["attribution"].get("stats", {}).get("calmar_ratio"),
+                    "profit_factor": r["attribution"].get("stats", {}).get("profit_factor"),
+                    "benchmark_beta": r["attribution"].get("beta", {}).get("benchmark_beta"),
+                    "jensen_alpha": r["attribution"].get("beta", {}).get("jensen_alpha_annualized"),
+                    "current_trend": r["attribution"].get("regime", {}).get("current_trend"),
+                    "vol_regime": r["attribution"].get("regime", {}).get("vol_regime"),
+                }
+        return {"results": enriched, "total": len(enriched)}
+    except Exception as e:
+        return {"message": f"Error: {e}"}
 
 
 @app.get("/api/training/stats")
@@ -650,3 +679,42 @@ async def get_circuit_state():
         }
     except Exception:
         return {"state": {"status": "open"}, "history": []}
+
+
+@app.get("/api/nautilus")
+async def get_nautilus_results():
+    try:
+        latest = await redis.get_json("nautilus:latest")
+        if not latest:
+            return {"message": "Nautilus not yet run", "enabled": NAUTILUS_ENABLED}
+        keys = await redis.client.keys("nautilus:*")
+        results = []
+        for key in keys:
+            if key in (b"nautilus:latest",):
+                continue
+            data = await redis.get_json(key)
+            if data:
+                results.append(data)
+        return {"latest": latest, "results": results, "enabled": True}
+    except Exception as e:
+        return {"message": str(e), "enabled": False}
+
+
+@app.get("/api/swarm")
+async def get_swarm_status():
+    try:
+        latest = await redis.get_json("swarm:latest")
+        if not latest:
+            return {"message": "Swarm not yet run"}
+        result = {
+            "timestamp": latest.get("timestamp"),
+            "market_outlook": latest.get("market_outlook"),
+            "risk_adjustment": latest.get("risk_adjustment"),
+            "confidence_adjustment": latest.get("confidence_adjustment"),
+            "kelly_fraction_suggested": latest.get("kelly_fraction_suggested"),
+            "param_adjustments": latest.get("param_adjustments"),
+            "reasoning": latest.get("reasoning"),
+        }
+        return result
+    except Exception as e:
+        return {"message": str(e)}
