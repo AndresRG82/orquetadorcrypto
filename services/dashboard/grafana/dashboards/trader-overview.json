@@ -1,0 +1,107 @@
+{
+  "annotations": { "list": [] },
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "id": null,
+  "links": [],
+  "liveNow": true,
+  "panels": [
+    {
+      "datasource": { "type": "postgres", "uid": "timescaledb" },
+      "fieldConfig": {
+        "defaults": { "color": { "mode": "palette-classic" }, "unit": "currencyUSD" },
+        "overrides": []
+      },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
+      "id": 1,
+      "options": { "legend": { "calcs": [], "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "single" } },
+      "title": "Portfolio Value",
+      "type": "timeseries",
+      "targets": [
+        {
+          "rawSql": "SELECT time AS \"time\", total_value_usd AS \"Total Value\", cash_usd AS \"Cash\" FROM portfolio_snapshots WHERE $__timeFilter(time) ORDER BY 1",
+          "format": "time_series",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "datasource": { "type": "postgres", "uid": "timescaledb" },
+      "fieldConfig": {
+        "defaults": { "color": { "mode": "thresholds" }, "thresholds": { "steps": [{ "color": "red", "value": null }, { "color": "green", "value": 0 }] }, "unit": "currencyUSD" },
+        "overrides": []
+      },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
+      "id": 2,
+      "title": "PnL per Trade",
+      "type": "barchart",
+      "targets": [
+        {
+          "rawSql": "SELECT time AS \"time\", symbol, pnl_usd FROM trades WHERE status = 'closed' AND $__timeFilter(time) ORDER BY 1 LIMIT 50",
+          "format": "table",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "datasource": { "type": "postgres", "uid": "timescaledb" },
+      "fieldConfig": {
+        "defaults": { "color": { "mode": "thresholds" }, "thresholds": { "steps": [{ "color": "blue", "value": null }, { "color": "green", "value": 25 }, { "color": "red", "value": 70 }] } },
+        "overrides": []
+      },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 },
+      "id": 3,
+      "title": "RSI by Symbol",
+      "type": "stat",
+      "targets": [
+        {
+          "rawSql": "SELECT symbol, rsi_14 FROM indicators WHERE timeframe = '1h' AND rsi_14 IS NOT NULL AND time > NOW() - INTERVAL '1 hour' ORDER BY time DESC LIMIT 20",
+          "format": "table",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "datasource": { "type": "postgres", "uid": "timescaledb" },
+      "fieldConfig": { "defaults": {}, "overrides": [] },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 },
+      "id": 4,
+      "title": "Recent Signals",
+      "type": "table",
+      "targets": [
+        {
+          "rawSql": "SELECT time, symbol, timeframe, signal, confidence, strategy, approved FROM signals ORDER BY time DESC LIMIT 30",
+          "format": "table",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "datasource": { "type": "postgres", "uid": "timescaledb" },
+      "fieldConfig": { "defaults": {}, "overrides": [] },
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 16 },
+      "id": 5,
+      "title": "Recent Trades",
+      "type": "table",
+      "targets": [
+        {
+          "rawSql": "SELECT time, symbol, side, entry_price, exit_price, quantity, pnl_usd, strategy, status FROM trades ORDER BY time DESC LIMIT 30",
+          "format": "table",
+          "refId": "A"
+        }
+      ]
+    }
+  ],
+  "refresh": "10s",
+  "schemaVersion": 38,
+  "style": "dark",
+  "tags": ["crypto", "trader"],
+  "templating": { "list": [] },
+  "time": { "from": "now-24h", "to": "now" },
+  "timepicker": {},
+  "timezone": "utc",
+  "title": "CryptoTrader Overview",
+  "uid": "cryptotrader-overview",
+  "version": 1
+}

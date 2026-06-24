@@ -1,0 +1,24 @@
+apiVersion: 1
+
+datasources:
+  - name: TimescaleDB
+    type: postgres
+    url: timescaledb:5432
+    database: trader
+    user: trader
+    secureJsonData:
+      password: trader123
+    jsonData:
+      sslmode: disable
+      maxOpenConns: 5
+      maxIdleConns: 5
+      connMaxLifetime: 14400
+      postgresVersion: 1600
+    isDefault: true
+    editable: true
+
+  - name: Redis
+    type: redis-datasource
+    url: redis://redis:6379
+    isDefault: false
+    editable: true

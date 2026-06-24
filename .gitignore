@@ -1,0 +1,16 @@
+.env
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+*.egg-info/
+dist/
+build/
+*.log
+.vscode/
+.idea/
+.venv/
+.venv*/
+services/fine-tuning/data/
+services/fine-tuning/models/
+training.log

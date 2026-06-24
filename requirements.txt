@@ -1,0 +1,15 @@
+ccxt==4.4.40
+redis==5.2.1
+asyncpg==0.30.0
+httpx==0.28.1
+pydantic==2.10.4
+fastapi==0.115.6
+uvicorn==0.34.0
+numpy==2.2.1
+pandas==2.2.3
+python-dotenv==1.0.1
+pyyaml==6.0.2
+psycopg2-binary==2.9.10
+ta==0.11.0
+vectorbt>=0.26.0
+numba>=0.60.0
