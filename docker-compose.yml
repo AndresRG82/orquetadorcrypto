@@ -165,6 +165,12 @@ services:
       DB_NAME: ${TIMESCALE_DB:-trader}
       DB_USER: ${TIMESCALE_USER:-trader}
       DB_PASSWORD: ${TIMESCALE_PASSWORD:-trader123}
+      OLLAMA_HOST: ${OLLAMA_HOST:-http://host.docker.internal:11434}
+      RISK_AUTOTUNE_ENABLED: ${RISK_AUTOTUNE_ENABLED:-true}
+      RISK_AUTOTUNE_INTERVAL: ${RISK_AUTOTUNE_INTERVAL:-300}
+      RISK_AUTOTUNE_MODEL: ${RISK_AUTOTUNE_MODEL:-qwen2.5:3b}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     depends_on:
       redis:
         condition: service_healthy

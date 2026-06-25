@@ -1,10 +1,13 @@
 import asyncio
 import json
 import logging
+import os
 import sys
 import time
 from datetime import datetime, timezone, timedelta
 from typing import Optional
+
+import httpx
 
 sys.path.insert(0, "/app")
 from shared.config import settings
@@ -23,6 +26,11 @@ SIGNAL_COOLDOWNS: dict[str, dict] = {
     "qwen_direct": {"seconds": 1800, "label": "30min"},
 }
 DEFAULT_COOLDOWN = 1800
+
+RISK_AUTOTUNE_ENABLED = os.getenv("RISK_AUTOTUNE_ENABLED", "false").lower() == "true"
+RISK_AUTOTUNE_INTERVAL = int(os.getenv("RISK_AUTOTUNE_INTERVAL", "300"))
+RISK_AUTOTUNE_MODEL = os.getenv("RISK_AUTOTUNE_MODEL", "qwen2.5:3b")
+OLLAMA_HOST = os.getenv("OLLAMA_HOST", "http://host.docker.internal:11434")
 
 
 class RiskManager:
@@ -49,6 +57,7 @@ class RiskManager:
         self.winning_trades: int = 0
         self.signal_cooldowns: dict[str, datetime] = {}
         self.evo_params: dict = {}
+        self.auto_tuner = RiskAutoTuner(self)
 
     async def initialize(self):
         self.redis = await RedisClient.get_instance()
@@ -453,6 +462,8 @@ class RiskManager:
         results_consumer = "risk-manager-results-1"
         sync_counter = 0
 
+        auto_tune_task = asyncio.create_task(self.auto_tuner.loop())
+
         logger.info("Risk Manager running")
         while self.running:
             try:
@@ -483,6 +494,163 @@ class RiskManager:
             except Exception as e:
                 logger.error(f"Risk Manager error: {e}")
                 await asyncio.sleep(5)
+
+        auto_tune_task.cancel()
+
+
+class RiskAutoTuner:
+    """Queries Ollama periodically to suggest optimal risk parameters based on live trading stats.
+    Applies smoothed changes to avoid abrupt shifts. Works alongside evolution-agent (coarse, 6h)."""
+
+    SYSTEM_PROMPT = (
+        "You are a risk parameter optimizer for a crypto trading system. "
+        "Based on live trading performance, suggest optimal min_confidence (0.35-0.70) "
+        "and min_risk_reward (0.8-3.0). "
+        "Rules: if win_rate < 30% or losing streak, tighten parameters. "
+        "If win_rate > 55% and PnL positive, relax slightly. "
+        "Respond ONLY with JSON: {\"min_confidence\": 0.XX, \"min_risk_reward\": X.X, \"reasoning\": \"...\"}"
+    )
+
+    def __init__(self, risk_manager: "RiskManager"):
+        self.rm = risk_manager
+        self.enabled = RISK_AUTOTUNE_ENABLED
+        self.interval = RISK_AUTOTUNE_INTERVAL
+        self.model = RISK_AUTOTUNE_MODEL
+        self.ollama_host = OLLAMA_HOST
+        self._conf_ema: float | None = None
+        self._rr_ema: float | None = None
+        self._alpha = 0.3
+
+    async def _collect_stats(self) -> dict:
+        rm = self.rm
+        stats = {
+            "current_params": {
+                "min_confidence": rm.evo_params.get("min_confidence", 0.5),
+                "min_risk_reward": rm.evo_params.get("min_risk_reward", 1.5),
+            },
+            "portfolio_value": round(rm.portfolio_value, 2),
+            "peak_value": round(rm.peak_value, 2),
+            "drawdown_pct": round((1 - rm.portfolio_value / max(rm.peak_value, 1)) * 100, 1),
+            "total_trades": rm.total_trades,
+            "winning_trades": rm.winning_trades,
+            "win_rate": round(rm.winning_trades / max(rm.total_trades, 1) * 100, 1),
+            "consecutive_losses": rm.consecutive_losses,
+            "open_positions": len(rm.open_positions),
+            "cash_available": round(rm.cash_available, 2),
+        }
+        try:
+            rows = await rm.db.fetch(
+                "SELECT symbol, side, pnl_usd, venue FROM trades "
+                "WHERE status = 'closed' ORDER BY time DESC LIMIT 20"
+            )
+            stats["recent_trades"] = [
+                {"symbol": r["symbol"], "side": r["side"], "pnl": round(float(r["pnl_usd"] or 0), 2), "venue": r.get("venue", "paper")}
+                for r in rows
+            ]
+        except Exception:
+            stats["recent_trades"] = []
+        return stats
+
+    def _build_prompt(self, stats: dict) -> str:
+        lines = ["Current trading state:"]
+        lines.append(f"  Portfolio: ${stats['portfolio_value']} (peak ${stats['peak_value']}, dd {stats['drawdown_pct']}%)")
+        lines.append(f"  Trades: {stats['total_trades']} total, {stats['winning_trades']} wins, win_rate={stats['win_rate']}%")
+        lines.append(f"  Consecutive losses: {stats['consecutive_losses']}")
+        lines.append(f"  Open positions: {stats['open_positions']}, cash: ${stats['cash_available']}")
+        lines.append(f"  Current min_confidence={stats['current_params']['min_confidence']}, min_risk_reward={stats['current_params']['min_risk_reward']}")
+        if stats["recent_trades"]:
+            lines.append("  Recent closed trades:")
+            for t in stats["recent_trades"][:10]:
+                lines.append(f"    {t['symbol']} {t['side']} pnl={t['pnl']} venue={t['venue']}")
+        return "\n".join(lines)
+
+    def _parse_response(self, text: str) -> Optional[dict]:
+        import re
+        for pattern in [r"\{[^{}]*\"min_confidence\"[^{}]*\}", r"\{[^{}]*\"min_risk_reward\"[^{}]*\}"]:
+            m = re.search(pattern, text, re.DOTALL)
+            if m:
+                try:
+                    parsed = json.loads(m.group())
+                    if "min_confidence" in parsed and "min_risk_reward" in parsed:
+                        return parsed
+                except json.JSONDecodeError:
+                    continue
+        return None
+
+    async def tune(self):
+        if not self.enabled or not self.rm.running:
+            return
+        try:
+            stats = await self._collect_stats()
+            if stats["total_trades"] < 2:
+                logger.info("RiskAutoTuner: not enough trades to tune (<2), skipping")
+                return
+
+            prompt = self._build_prompt(stats)
+            async with httpx.AsyncClient(timeout=15.0) as client:
+                response = await client.post(
+                    f"{self.ollama_host}/api/generate",
+                    json={
+                        "model": self.model,
+                        "prompt": prompt,
+                        "system": self.SYSTEM_PROMPT,
+                        "stream": False,
+                        "options": {"temperature": 0.1, "num_predict": 150},
+                    },
+                )
+                response.raise_for_status()
+                data = response.json()
+                raw = data.get("response", "")
+                parsed = self._parse_response(raw)
+                if not parsed:
+                    logger.warning(f"RiskAutoTuner: could not parse Ollama response: {raw[:150]}")
+                    return
+
+            new_conf = float(parsed["min_confidence"])
+            new_rr = float(parsed["min_risk_reward"])
+            new_conf = max(0.35, min(0.70, new_conf))
+            new_rr = max(0.8, min(3.0, new_rr))
+
+            if self._conf_ema is None:
+                self._conf_ema = new_conf
+                self._rr_ema = new_rr
+            else:
+                self._conf_ema = self._alpha * new_conf + (1 - self._alpha) * self._conf_ema
+                self._rr_ema = self._alpha * new_rr + (1 - self._alpha) * self._rr_ema
+
+            old_conf = self.rm.evo_params.get("min_confidence", 0.5)
+            old_rr = self.rm.evo_params.get("min_risk_reward", 1.5)
+            self.rm.evo_params["min_confidence"] = round(self._conf_ema, 2)
+            self.rm.evo_params["min_risk_reward"] = round(self._rr_ema, 2)
+
+            logger.info(
+                f"RiskAutoTuner: conf={old_conf:.2f}→{self._conf_ema:.2f} "
+                f"rr={old_rr:.2f}→{self._rr_ema:.2f} | {parsed.get('reasoning', '')[:100]}"
+            )
+
+            await self.rm.redis.set_json("risk:auto_tune", {
+                "min_confidence": round(self._conf_ema, 2),
+                "min_risk_reward": round(self._rr_ema, 2),
+                "reasoning": parsed.get("reasoning", ""),
+                "stats_snapshot": {
+                    "win_rate": stats["win_rate"],
+                    "consecutive_losses": stats["consecutive_losses"],
+                    "drawdown_pct": stats["drawdown_pct"],
+                },
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+            })
+        except Exception as e:
+            logger.warning(f"RiskAutoTuner: tune failed: {e}")
+
+    async def loop(self):
+        while self.rm.running:
+            try:
+                await self.tune()
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.error(f"RiskAutoTuner loop error: {e}")
+            await asyncio.sleep(self.interval)
 
 
 async def main():
