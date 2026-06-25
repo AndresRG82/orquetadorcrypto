@@ -93,6 +93,8 @@ async def root():
         .btn.danger { background: #ff4757; }
         .btn.danger:hover { background: #e84343; }
         .controls { margin-bottom: 20px; }
+        .portfolio-group { margin-bottom: 20px; }
+        .portfolio-title { color: #00d4aa; font-size: 0.85rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 8px; padding: 4px 0; border-bottom: 1px solid #1a1a1a; }
     </style></head><body>
     <h1>CryptoTrader Dashboard</h1>
     <div class="controls">
@@ -153,23 +155,26 @@ async def root():
             if (portfolios) {
                 Object.entries(portfolios).forEach(([key, p]) => {
                     portfolioCards.push(
-                        `<div style="grid-column:1/-1;margin-top:5px;color:#00d4aa;font-size:0.9rem;font-weight:600">${p.label}</div>`,
-                        { label: 'Valor', value: `$${(p.value||0).toFixed(2)}`, cls: '' },
-                        { label: 'PnL', value: `$${(p.pnl||0).toFixed(2)}`, cls: (p.pnl||0)>=0?'positive':'negative', detail: `${(p.pnl_pct||0).toFixed(1)}%` },
-                        { label: 'Trades', value: p.trades||0, cls: '' },
-                        { label: 'Win Rate', value: `${(p.win_rate||0).toFixed(1)}%`, cls: '' },
-                        { label: 'Posiciones', value: p.positions||0, cls: '' },
+                        `<div class="portfolio-group"><div class="portfolio-title">${p.label}</div><div class="grid">` +
+                        `<div class="card"><div class="label">Valor</div><div class="value">$${(p.value||0).toFixed(2)}</div>` +
+                        `${p.cash ? `<div style="font-size:0.7rem;color:#666">Cash: $${p.cash.toFixed(2)}</div>` : ''}</div>` +
+                        `<div class="card"><div class="label">PnL</div><div class="value ${(p.pnl||0)>=0?'positive':'negative'}">` +
+                        `${(p.pnl||0)>=0?'+':''}$${(p.pnl||0).toFixed(2)}</div><div style="font-size:0.75rem;color:#666">` +
+                        `${(p.pnl_pct||0).toFixed(1)}%</div></div>` +
+                        `<div class="card"><div class="label">Trades</div><div class="value">${p.trades||0}</div></div>` +
+                        `<div class="card"><div class="label">Win Rate</div><div class="value">${(p.win_rate||0).toFixed(1)}%</div></div>` +
+                        `<div class="card"><div class="label">Posiciones</div><div class="value">${p.positions||0}</div></div>` +
+                        `</div></div>`
                     );
                 });
             }
-            document.getElementById('stats').innerHTML = portfolioCards.filter(c => typeof c === 'string' ? true : false)
-                .concat(portfolioCards.filter(c => typeof c !== 'string').map(c =>
-                    `<div class="card"><div class="label">${c.label}</div><div class="value ${c.cls}">${c.value}</div>${c.detail ? `<div style="font-size:0.75rem;color:#666">${c.detail}</div>` : ''}</div>`
-                )).join('');
+            document.getElementById('stats').innerHTML = portfolioCards.join('');
 
-            const posHtml = stats.positions ? Object.values(stats.positions).map(p =>
-                `<tr><td>${p.symbol}</td><td class="${p.side}">${p.side}</td><td>${(p.quantity||0).toFixed(4)}</td><td>$${(p.entry_price||0).toFixed(4)}</td><td>-</td><td>${p.strategy||'-'}</td></tr>`
-            ).join('') : '';
+            const posHtml = stats.positions ? Object.values(stats.positions).map(p => {
+                const upnl = p.current_value ? (p.current_value - (p.quantity||0)*(p.entry_price||0)) : null;
+                const pnlStr = upnl !== null ? `<span class="${upnl>=0?'positive':'negative'}">${upnl>=0?'+':''}$${upnl.toFixed(2)}</span>` : '-';
+                return `<tr><td>${p.symbol}</td><td class="${p.side}">${p.side}</td><td>${(p.quantity||0).toFixed(4)}</td><td>$${(p.entry_price||0).toFixed(4)}</td><td>${pnlStr}</td><td>${p.strategy||'-'}</td></tr>`;
+            }).join('') : '';
             document.querySelector('#positions tbody').innerHTML = posHtml || '<tr><td colspan="6" style="text-align:center;color:#888">Sin posiciones abiertas</td></tr>';
 
             document.querySelector('#trades tbody').innerHTML = (trades||[]).length > 0
