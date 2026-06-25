@@ -18,13 +18,6 @@ CHECK_INTERVAL = 24 * 3600  # 24 hours
 
 INSTANCES = {
     "main": {"state": "paper_trading:state", "stats": "portfolio:stats"},
-    "highconf": {"state": "paper_trading:highconf", "stats": "portfolio:stats:highconf"},
-    "main-tf": {"state": "paper_trading:main-tf", "stats": "portfolio:stats:main-tf"},
-    "conservative-tf": {"state": "paper_trading:conservative-tf", "stats": "portfolio:stats:conservative-tf"},
-    "highconf-tf": {"state": "paper_trading:highconf-tf", "stats": "portfolio:stats:highconf-tf"},
-    "multitf-tf": {"state": "paper_trading:multitf-tf", "stats": "portfolio:stats:multitf-tf"},
-    "lowfreq-tf": {"state": "paper_trading:lowfreq-tf", "stats": "portfolio:stats:lowfreq-tf"},
-    "sentiment-tf": {"state": "paper_trading:sentiment-tf", "stats": "portfolio:stats:sentiment-tf"},
 }
 
 PROMOTION_RULES = {

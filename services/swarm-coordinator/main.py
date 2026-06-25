@@ -22,7 +22,7 @@ class SwarmCoordinator:
 
     async def initialize(self):
         self.redis = await RedisClient.get_instance()
-        from services.swarm_coordinator.runtime import OllamaRuntime
+        from runtime import OllamaRuntime
         self.runtime = OllamaRuntime(
             base_url=settings.OLLAMA_HOST,
             primary_model="gemma3:4b",
@@ -34,7 +34,7 @@ class SwarmCoordinator:
         data = {}
         stats = await self.redis.get_json("portfolio:stats") or {}
         risk_params = await self.redis.get_json("risk:params") or {}
-        sentiment = await self.redis.get_json("sentiment:latest") or {}
+        sentiment = await self.redis.get_json("sentiment:current") or {}
         signals = await self.redis.get_json("strategy:latest_signals") or []
         metrics = await self.redis.get_json("strategy:metrics") or {}
         backtest = await self.redis.get_json("backtest:latest") or {}
@@ -66,7 +66,7 @@ class SwarmCoordinator:
         if self.runtime is None:
             return
 
-        from services.swarm_coordinator.agents import (
+        from agents import (
             MARKET_ANALYST_PROMPT, RISK_MANAGER_PROMPT,
             STRATEGY_CRITIC_PROMPT, SENTIMENT_ANALYST_PROMPT,
             COORDINATOR_PROMPT,

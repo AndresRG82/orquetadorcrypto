@@ -14,7 +14,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(name)s] %(levelna
 logger = logging.getLogger("stop-loss-monitor")
 
 TRAILING_CONFIG = {
-    "scalping": {"activation_pct": 1.0, "trail_atr_mult": 1.0, "breakeven_pct": 0.5},
+    "scalping": {"activation_pct": 2.5, "trail_atr_mult": 2.0, "breakeven_pct": 1.5},
     "swing": {"activation_pct": 3.0, "trail_atr_mult": 1.5, "breakeven_pct": 1.5},
     "arbitrage": {"activation_pct": 2.0, "trail_atr_mult": 1.0, "breakeven_pct": 1.0},
     "qwen_direct": {"activation_pct": 2.0, "trail_atr_mult": 1.5, "breakeven_pct": 1.0},
@@ -24,13 +24,6 @@ DEFAULT_TRAILING = {"activation_pct": 2.0, "trail_atr_mult": 1.5, "breakeven_pct
 
 PT_STATE_KEYS = [
     "paper_trading:state",
-    "paper_trading:highconf",
-    "paper_trading:main-tf",
-    "paper_trading:conservative-tf",
-    "paper_trading:highconf-tf",
-    "paper_trading:multitf-tf",
-    "paper_trading:lowfreq-tf",
-    "paper_trading:sentiment-tf",
 ]
 
 
@@ -268,6 +261,7 @@ class StopLossMonitor:
         logger.info("Stop-Loss Monitor running (with trailing stops)")
         while self.running:
             try:
+                await self.redis.heartbeat("stop-loss")
                 market = await self.redis.read_stream(settings.STREAM_MARKET_DATA, market_group, market_consumer, count=50, block=2000)
                 for msg_id, data in market:
                     await self.process_market_data(data)

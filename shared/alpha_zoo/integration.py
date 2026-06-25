@@ -39,7 +39,7 @@ class AlphaIntegration:
         rows = await db.fetch(
             """
             SELECT time, symbol, open, high, low, close, volume
-            FROM candles
+            FROM ohlcv
             WHERE timeframe = $1
               AND time >= NOW() - INTERVAL '1 day' * $2
             ORDER BY time, symbol

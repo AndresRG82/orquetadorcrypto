@@ -35,7 +35,6 @@ class Orchestrator:
         self.redis = await RedisClient.get_instance()
         self.db = await Database.get_instance()
         await self.load_portfolio()
-        await self.redis.set_json("orchestrator:status", {"status": "running", "started_at": datetime.now(timezone.utc).isoformat()})
         logger.info(f"Orchestrator initialized: capital=${self.initial_capital}, base={self.base_currency}")
 
     async def load_portfolio(self):
@@ -139,7 +138,6 @@ class Orchestrator:
 
             await self.redis.publish(settings.STREAM_TRADE_ORDERS, order.model_dump(mode="json"))
             await self.redis.set_json(f"signal:{signal_id}", signal.model_dump(mode="json"), ex=3600)
-            await self.redis.set("last_signal", signal.model_dump_json(), ex=3600)
 
             logger.info(
                 f"ORDER: {order.side.value} {order.symbol} qty={order.quantity:.6f} "
@@ -148,57 +146,6 @@ class Orchestrator:
 
         except Exception as e:
             logger.error(f"Error processing approved signal: {e}")
-
-    async def check_stop_losses_and_targets(self, market_data: dict):
-        try:
-            symbol = market_data.get("symbol", "")
-            current_price = float(market_data.get("close", 0))
-
-            if current_price <= 0:
-                return
-
-            for oid, position in list(self.positions.items()):
-                if position.symbol != symbol:
-                    continue
-
-                should_close = False
-                reason = ""
-
-                if position.stop_loss:
-                    if position.side == SignalType.BUY and current_price <= position.stop_loss:
-                        should_close = True
-                        reason = f"Stop loss hit: {current_price} <= {position.stop_loss}"
-                    elif position.side == SignalType.SELL and current_price >= position.stop_loss:
-                        should_close = True
-                        reason = f"Stop loss hit: {current_price} >= {position.stop_loss}"
-
-                if position.take_profit and not should_close:
-                    if position.side == SignalType.BUY and current_price >= position.take_profit:
-                        should_close = True
-                        reason = f"Take profit hit: {current_price} >= {position.take_profit}"
-                    elif position.side == SignalType.SELL and current_price <= position.take_profit:
-                        should_close = True
-                        reason = f"Take profit hit: {current_price} <= {position.take_profit}"
-
-                if should_close:
-                    close_order = TradeOrder(
-                        order_id=str(uuid.uuid4()),
-                        signal_id=position.order_id,
-                        symbol=position.symbol,
-                        side=SignalType.SELL if position.side == SignalType.BUY else SignalType.BUY,
-                        entry_price=current_price,
-                        quantity_usd=position.quantity * current_price,
-                        quantity=position.quantity,
-                        strategy=f"close_{position.strategy}",
-                        confidence=1.0,
-                        reasoning=reason,
-                        timestamp=datetime.now(timezone.utc),
-                    )
-                    await self.redis.publish(settings.STREAM_TRADE_ORDERS, close_order.model_dump(mode="json"))
-                    logger.info(f"CLOSE ORDER: {reason} for {position.symbol}")
-
-        except Exception as e:
-            logger.error(f"Error checking stop losses: {e}")
 
     async def update_from_trade_results(self, data: dict):
         try:
@@ -279,23 +226,15 @@ class Orchestrator:
         except Exception as e:
             logger.warning(f"Sync error: {e}")
 
-    async def periodic_snapshot(self):
+    async def periodic_heartbeat(self):
         while self.running:
             try:
                 await asyncio.sleep(60)
-                total_value = self.cash + sum(p.quantity_usd for p in self.positions.values())
-                snapshot = PortfolioSnapshot(
-                    timestamp=datetime.now(timezone.utc),
-                    total_value_usd=total_value,
-                    cash_usd=self.cash,
-                    positions=list(self.positions.values()),
-                    unrealized_pnl_usd=self.closed_pnl,
-                )
-                await self.redis.set_json("portfolio:latest", snapshot.model_dump(mode="json"))
+                await self.redis.heartbeat("orchestrator")
             except asyncio.CancelledError:
                 break
             except Exception as e:
-                logger.error(f"Snapshot error: {e}")
+                logger.error(f"Heartbeat error: {e}")
 
     async def cache_signals(self, data: dict):
         try:
@@ -315,12 +254,10 @@ class Orchestrator:
         approved_consumer = "orchestrator-1"
         results_group = "orchestrator-results"
         results_consumer = "orchestrator-results-1"
-        market_group = "orchestrator-market"
-        market_consumer = "orchestrator-market-1"
         signals_group = "orchestrator-signals"
         signals_consumer = "orchestrator-signals-1"
 
-        snapshot_task = asyncio.create_task(self.periodic_snapshot())
+        hb_task = asyncio.create_task(self.periodic_heartbeat())
         sync_counter = 0
 
         logger.info("Orchestrator running")
@@ -344,12 +281,6 @@ class Orchestrator:
                 for msg_id, data in results:
                     await self.update_from_trade_results(data)
 
-                market = await self.redis.read_stream(
-                    settings.STREAM_MARKET_DATA, market_group, market_consumer, count=10, block=1000,
-                )
-                for msg_id, data in market:
-                    await self.check_stop_losses_and_targets(data)
-
                 sync_counter += 1
                 if sync_counter % 30 == 0:
                     await self.sync_from_paper_trading()
@@ -361,7 +292,7 @@ class Orchestrator:
                 logger.error(f"Orchestrator error: {e}")
                 await asyncio.sleep(5)
 
-        snapshot_task.cancel()
+        hb_task.cancel()
 
 
 async def main():

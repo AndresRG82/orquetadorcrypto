@@ -94,7 +94,11 @@ class MarketScanner:
         self.redis = await RedisClient.get_instance()
         self.db = await Database.get_instance()
         exchange_cls = getattr(ccxt, settings.EXCHANGE)
-        self.exchange = exchange_cls({"enableRateLimit": True})
+        exchange_config = {"enableRateLimit": True}
+        if settings.EXCHANGE_API_KEY:
+            exchange_config["apiKey"] = settings.EXCHANGE_API_KEY
+            exchange_config["secret"] = settings.EXCHANGE_API_SECRET
+        self.exchange = exchange_cls(exchange_config)
         await self.load_active_pairs()
         logger.info(f"Market Scanner initialized with {len(self.active_pairs)} pairs")
 
@@ -199,6 +203,7 @@ class MarketScanner:
         while self.running:
             tasks = [self.fetch_and_publish(pair, timeframe) for pair in self.active_pairs]
             await asyncio.gather(*tasks, return_exceptions=True)
+            await self.redis.heartbeat("market-scanner")
             logger.debug(f"Completed scan for {timeframe}, {len(self.active_pairs)} pairs")
             await asyncio.sleep(interval)
 

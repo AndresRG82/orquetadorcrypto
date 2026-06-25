@@ -337,6 +337,7 @@ class BacktestEngine:
         logger.info("Backtesting Engine running (vectorbt mode, every 6h)")
         while self.running:
             try:
+                await self.redis.heartbeat("backtesting")
                 await self.run_all_backtests()
                 await asyncio.sleep(21600)
             except asyncio.CancelledError:

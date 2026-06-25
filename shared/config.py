@@ -21,6 +21,13 @@ class Settings:
     OLLAMA_FALLBACK_MODELS: list = ["gemma3:4b", "qwen2.5:3b"]
 
     EXCHANGE: str = os.getenv("EXCHANGE", "binance")
+    EXCHANGE_API_KEY: str = os.getenv(f"{os.getenv('EXCHANGE', 'binance').upper()}_API_KEY", "")
+    EXCHANGE_API_SECRET: str = os.getenv(f"{os.getenv('EXCHANGE', 'binance').upper()}_API_SECRET", "")
+
+    PAPER_EXCHANGE: str = os.getenv("PAPER_EXCHANGE", os.getenv("EXCHANGE", "bybit"))
+    PAPER_API_KEY: str = os.getenv(f"{os.getenv('PAPER_EXCHANGE', os.getenv('EXCHANGE', 'bybit')).upper()}_API_2_KEY", "")
+    PAPER_API_SECRET: str = os.getenv(f"{os.getenv('PAPER_EXCHANGE', os.getenv('EXCHANGE', 'bybit')).upper()}_API_2_SECRET", "")
+    PAPER_TESTNET: bool = os.getenv("PAPER_TESTNET", "true").lower() == "true"
 
     INITIAL_CAPITAL: float = float(os.getenv("INITIAL_CAPITAL", "1000.0"))
     BASE_CURRENCY: str = os.getenv("BASE_CURRENCY", "USDT")

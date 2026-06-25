@@ -1,3 +1,4 @@
+import asyncio
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse
@@ -24,17 +25,39 @@ app.add_middleware(
 
 redis: RedisClient | None = None
 db: Database | None = None
+_hb_task: asyncio.Task | None = None
+
+SERVICE_LIST = [
+    "market-scanner", "qwen-analyzer", "strategy-scalping", "strategy-swing",
+    "strategy-arbitrage", "risk-manager", "orchestrator", "paper-trading",
+    "stop-loss", "stop-loss-tracker", "backtesting", "evolution-agent",
+    "dashboard", "watchdog", "monitoring",
+]
+
+
+async def _heartbeat_loop():
+    while True:
+        try:
+            if redis:
+                await redis.heartbeat("dashboard")
+        except Exception:
+            pass
+        await asyncio.sleep(30)
 
 
 @app.on_event("startup")
 async def startup():
-    global redis, db
+    global redis, db, _hb_task
     redis = await RedisClient.get_instance()
     db = await Database.get_instance()
+    _hb_task = asyncio.create_task(_heartbeat_loop())
 
 
 @app.on_event("shutdown")
 async def shutdown():
+    global _hb_task
+    if _hb_task:
+        _hb_task.cancel()
     if redis:
         await redis.close()
     if db:
@@ -95,13 +118,16 @@ async def root():
     <table id="nautilus"><thead><tr><th>Estrategia</th><th>Symbol</th><th>TF</th><th>Sharpe Nautilus</th><th>Sharpe VBT</th><th>Diff</th><th>PnL Nautilus</th><th>Trades Nautilus</th></tr></thead><tbody></tbody></table>
     <h2>Swarm Coordinator</h2>
     <table id="swarm"><thead><tr><th>Indicador</th><th>Valor</th></tr></thead><tbody></tbody></table>
+    <h2>Estado de Servicios</h2>
+    <table id="services"><thead><tr><th>Servicio</th><th>Estado</th><th>Ultimo heartbeat</th><th>Edad (s)</th></tr></thead><tbody></tbody></table>
     <script>
     async function loadData() {
         try {
-            const [statsRes, tradesRes, signalsRes, metricsRes, sentimentRes, backtestRes, evolutionRes, attributionRes, nautilusRes, swarmRes] = await Promise.all([
+            const [statsRes, tradesRes, signalsRes, metricsRes, sentimentRes, backtestRes, evolutionRes, attributionRes, nautilusRes, swarmRes, servicesRes] = await Promise.all([
                 fetch('/api/stats'), fetch('/api/trades?limit=20'), fetch('/api/signals?limit=20'), fetch('/api/metrics'),
                 fetch('/api/sentiment'), fetch('/api/backtest'), fetch('/api/evolution'),
-                fetch('/api/backtest/attribution'), fetch('/api/nautilus'), fetch('/api/swarm')
+                fetch('/api/backtest/attribution'), fetch('/api/nautilus'), fetch('/api/swarm'),
+                fetch('/api/services')
             ]);
             const stats = await statsRes.json();
             const trades = await tradesRes.json();
@@ -121,6 +147,45 @@ async def root():
                     attrMap[key] = a.attribution_summary || {};
                 });
             }
+
+            const statsCards = [
+                { label: 'Valor Total', value: `$${(stats.total_value||0).toFixed(2)}`, cls: '',
+                  detail: `Cap: $${(stats.initial_capital||0).toFixed(0)}` },
+                { label: 'Cash', value: `$${(stats.cash||0).toFixed(2)}`, cls: '' },
+                { label: 'PnL Total', value: `$${(stats.total_pnl||0).toFixed(2)}`, cls: (stats.total_pnl||0)>=0?'positive':'negative',
+                  detail: `${(stats.total_pnl_pct||0).toFixed(1)}%` },
+                { label: 'Posiciones', value: stats.open_positions||0, cls: '' },
+                { label: 'Trades', value: stats.total_trades||0, cls: '' },
+                { label: 'Win Rate', value: `${(stats.win_rate||0).toFixed(1)}%`, cls: '' },
+            ];
+            document.getElementById('stats').innerHTML = statsCards.map(c =>
+                `<div class="card"><div class="label">${c.label}</div><div class="value ${c.cls}">${c.value}</div>${c.detail ? `<div style="font-size:0.75rem;color:#666">${c.detail}</div>` : ''}</div>`
+            ).join('');
+
+            const posHtml = stats.positions ? Object.values(stats.positions).map(p =>
+                `<tr><td>${p.symbol}</td><td class="${p.side}">${p.side}</td><td>${(p.quantity||0).toFixed(4)}</td><td>$${(p.entry_price||0).toFixed(4)}</td><td>-</td><td>${p.strategy||'-'}</td></tr>`
+            ).join('') : '';
+            document.querySelector('#positions tbody').innerHTML = posHtml || '<tr><td colspan="6" style="text-align:center;color:#888">Sin posiciones abiertas</td></tr>';
+
+            document.querySelector('#trades tbody').innerHTML = (trades||[]).length > 0
+                ? trades.map(t => `<tr><td>${new Date(t.time).toLocaleTimeString()}</td><td>${t.symbol}</td><td class="${t.side}">${t.side}</td><td class="${(t.pnl_usd||0)>=0?'positive':'negative'}">${t.pnl_usd ? '$'+t.pnl_usd.toFixed(2) : '-'}</td><td>${t.strategy||'-'}</td><td>${t.status||'-'}</td></tr>`).join('')
+                : '<tr><td colspan="6" style="text-align:center;color:#888">Sin operaciones</td></tr>';
+
+            document.querySelector('#signals tbody').innerHTML = (signals||[]).length > 0
+                ? signals.map(s => `<tr><td>${new Date(s.time).toLocaleTimeString()}</td><td>${s.symbol}</td><td class="${s.signal}">${s.signal}</td><td>${(s.confidence||0).toFixed(2)}</td><td>${s.strategy||'-'}</td></tr>`).join('')
+                : '<tr><td colspan="5" style="text-align:center;color:#888">Sin senales</td></tr>';
+
+            document.querySelector('#metrics tbody').innerHTML = (metrics||[]).length > 0
+                ? metrics.map(m => `<tr><td>${m.strategy}</td><td>${m.total_trades}</td><td>${(m.win_rate||0).toFixed(1)}%</td><td class="${(m.total_pnl||0)>=0?'positive':'negative'}">$${(m.total_pnl||0).toFixed(2)}</td><td class="${(m.avg_pnl||0)>=0?'positive':'negative'}">$${(m.avg_pnl||0).toFixed(2)}</td></tr>`).join('')
+                : '<tr><td colspan="5" style="text-align:center;color:#888">Sin metricas</td></tr>';
+
+            const sentRows = [];
+            if (sentiment && sentiment.fear_greed) { sentRows.push(`<tr><td>Fear & Greed</td><td>${sentiment.fear_greed.value||'-'} (${sentiment.fear_greed.classification||'-'})</td></tr>`); }
+            if (sentiment && sentiment.sentiment) {
+                Object.entries(sentiment.sentiment).forEach(([k,v]) => sentRows.push(`<tr><td>${k}</td><td>${typeof v==='object'?JSON.stringify(v):v}</td></tr>`));
+            }
+            if (sentiment && sentiment.funding_rates) { sentRows.push(`<tr><td>Funding Rates</td><td>${JSON.stringify(sentiment.funding_rates)}</td></tr>`); }
+            document.querySelector('#sentiment tbody').innerHTML = sentRows.length > 0 ? sentRows.join('') : '<tr><td colspan="2" style="text-align:center;color:#888">Sin datos de sentimiento</td></tr>';
 
             const btResults = backtest.results || [];
             document.querySelector('#backtest tbody').innerHTML = btResults.length > 0
@@ -171,6 +236,12 @@ async def root():
                 `<tr><td>Ultima actualizacion</td><td>${swarm.timestamp ? new Date(swarm.timestamp).toLocaleString() : '-'}</td></tr>`
             ].join('') : '<tr><td colspan="2" style="text-align:center;color:#888">Sin datos del Swarm</td></tr>';
             document.querySelector('#swarm tbody').innerHTML = swarmRows;
+
+            const services = await servicesRes.json();
+            const svcRows = Object.entries(services).map(([name, s]) =>
+                `<tr><td>${name}</td><td style="color:${s.status==='up'?'#00d4aa':s.status==='stale'?'#ffa502':'#ff4757'}">${s.status}</td><td>${s.last_seen ? new Date(s.last_seen).toLocaleTimeString() : '-'}</td><td>${s.age_seconds !== null ? s.age_seconds+'s' : '-'}</td></tr>`
+            ).join('');
+            document.querySelector('#services tbody').innerHTML = svcRows;
         } catch(e) {
             document.getElementById('stats').innerHTML = '<div class="card" style="color:#ff4757">Error: ' + e.message + '</div>';
         }
@@ -206,31 +277,35 @@ async def get_stats():
             }
         portfolio = await redis.get_json("paper_trading:state")
         stats["positions"] = portfolio.get("positions", {}) if portfolio else {}
+        trade_stats = await db.fetch(
+            "SELECT COUNT(*) as total, COUNT(*) FILTER (WHERE pnl_usd > 0) as wins, COUNT(*) FILTER (WHERE pnl_usd < 0) as losses FROM trades WHERE status = 'closed'"
+        )
+        if trade_stats and trade_stats[0]["total"]:
+            t = trade_stats[0]
+            stats["total_trades"] = t["total"]
+            stats["winning_trades"] = t["wins"]
+            stats["losing_trades"] = t["losses"]
+            stats["win_rate"] = round(t["wins"] / t["total"] * 100, 1) if t["total"] > 0 else 0
         return stats
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
 
 INSTANCES = {
-    "main": {"state": "paper_trading:state", "stats": "portfolio:stats", "label": "Main (Consolidated)"},
-    "highconf": {"state": "paper_trading:highconf", "stats": "portfolio:stats:highconf", "label": "High Confidence (>=90%)"},
-    # A/B Test: Time Filter variants
-    "main-tf": {"state": "paper_trading:main-tf", "stats": "portfolio:stats:main-tf", "label": "Main + TimeFilter (5,6,8,17,22h)"},
-    "conservative-tf": {"state": "paper_trading:conservative-tf", "stats": "portfolio:stats:conservative-tf", "label": "Conservative + TimeFilter"},
-    "highconf-tf": {"state": "paper_trading:highconf-tf", "stats": "portfolio:stats:highconf-tf", "label": "HighConf + TimeFilter"},
-    "multitf-tf": {"state": "paper_trading:multitf-tf", "stats": "portfolio:stats:multitf-tf", "label": "MultiTF + TimeFilter"},
-    "lowfreq-tf": {"state": "paper_trading:lowfreq-tf", "stats": "portfolio:stats:lowfreq-tf", "label": "LowFreq + TimeFilter"},
-    "sentiment-tf": {"state": "paper_trading:sentiment-tf", "stats": "portfolio:stats:sentiment-tf", "label": "Sentiment + TimeFilter"},
-    # Freqtrade instances
-    "freqtrade-meanrev": {"state": "paper_trading:freqtrade-meanrev", "stats": "portfolio:stats:freqtrade-meanrev", "label": "Freqtrade MeanReversion"},
-    "freqtrade-lowfreq": {"state": "paper_trading:freqtrade-lowfreq", "stats": "portfolio:stats:freqtrade-lowfreq", "label": "Freqtrade LowFrequency"},
-    "freqtrade-swing": {"state": "paper_trading:freqtrade-swing", "stats": "portfolio:stats:freqtrade-swing", "label": "Freqtrade Swing"},
+    "main": {"state": "paper_trading:state", "stats": "portfolio:stats", "label": "Main"},
 }
 
 
 @app.get("/api/portfolios")
 async def get_portfolios():
     try:
+        trade_stats = await db.fetch(
+            "SELECT COUNT(*) as total, COUNT(*) FILTER (WHERE pnl_usd > 0) as wins, COUNT(*) FILTER (WHERE pnl_usd < 0) as losses FROM trades WHERE status = 'closed'"
+        )
+        db_trades = trade_stats[0]["total"] if trade_stats else 0
+        db_wins = trade_stats[0]["wins"] if trade_stats else 0
+        db_win_rate = round(db_wins / db_trades * 100, 1) if db_trades > 0 else 0
+
         result = {}
         for name, cfg in INSTANCES.items():
             stats = await redis.get_json(cfg["stats"])
@@ -246,8 +321,8 @@ async def get_portfolios():
                 "cash": round(stats.get("cash", 1000), 2),
                 "pnl": round(stats.get("total_pnl", 0), 2),
                 "pnl_pct": round(stats.get("total_pnl_pct", 0), 2),
-                "trades": stats.get("total_trades", 0),
-                "win_rate": round(stats.get("win_rate", 0), 1),
+                "trades": db_trades,
+                "win_rate": db_win_rate,
                 "positions": stats.get("open_positions", 0),
                 "fees": round(stats.get("total_fees", 0), 2),
             }
@@ -355,6 +430,37 @@ async def reset_portfolio():
 @app.get("/api/health")
 async def health():
     return {"status": "ok", "timestamp": datetime.now(timezone.utc).isoformat()}
+
+
+SERVICE_STALE_SECONDS = {
+    "stop-loss": 30, "stop-loss-tracker": 30, "market-scanner": 600,
+    "dashboard": 60, "monitoring": 120, "watchdog": 300,
+    "backtesting": 24000, "evolution-agent": 24000,
+    "orchestrator": 120, "qwen-analyzer": 60, "paper-trading": 30,
+    "risk-manager": 30, "strategy-scalping": 30, "strategy-swing": 30,
+    "strategy-arbitrage": 30,
+}
+DEFAULT_STALE = 30
+
+
+@app.get("/api/services")
+async def get_services():
+    try:
+        result = {}
+        now = datetime.now(timezone.utc)
+        for name in SERVICE_LIST:
+            hb = await redis.get_json(f"service:heartbeat:{name}")
+            if hb and hb.get("last_seen"):
+                last = datetime.fromisoformat(hb["last_seen"])
+                age = (now - last).total_seconds()
+                stale_after = SERVICE_STALE_SECONDS.get(name, DEFAULT_STALE)
+                status = "down" if age > stale_after * 3 else ("stale" if age > stale_after else "up")
+                result[name] = {"status": status, "last_seen": hb["last_seen"], "age_seconds": round(age, 1)}
+            else:
+                result[name] = {"status": "unknown", "last_seen": None, "age_seconds": None}
+        return result
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.get("/api/sentiment")

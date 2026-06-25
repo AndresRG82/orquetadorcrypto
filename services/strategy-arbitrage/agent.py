@@ -17,6 +17,8 @@ from shared.alpha_zoo.integration import AlphaIntegration
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(name)s] %(levelname)s: %(message)s")
 logger = logging.getLogger("strategy-arbitrage")
 
+ALLOWED_REGIMES = {"trending_up", "trending_down", "ranging"}
+
 CORRELATION_PAIRS = {
     "BTC/USDT": ["ETH/USDT", "SOL/USDT", "BNB/USDT"],
     "ETH/USDT": ["BTC/USDT", "SOL/USDT", "LINK/USDT"],
@@ -53,6 +55,18 @@ class ArbitrageAgent:
         }
         self.params = {**defaults, **(stored or {}), **(config or {})}
         logger.info(f"Arbitrage params loaded: bb_width={self.params['bb_width_threshold']} sl_mult={self.params['atr_sl_multiplier']}")
+
+    async def _check_regime(self) -> bool:
+        try:
+            regime_data = await self.redis.get_json("market:regime")
+            if regime_data:
+                regime = regime_data.get("regime")
+                if regime and regime not in ALLOWED_REGIMES:
+                    logger.info(f"Regime '{regime}' not allowed for arbitrage, skipping")
+                    return False
+        except Exception:
+            pass
+        return True
 
     def check_correlation_divergence(self, ind: TechnicalIndicators) -> Optional[dict]:
         symbol = ind.symbol
@@ -166,6 +180,10 @@ class ArbitrageAgent:
             ind = TechnicalIndicators(**data)
             self.latest_data[ind.symbol][ind.timeframe] = ind
 
+            regime_allowed = await self._check_regime()
+            if not regime_allowed:
+                return
+
             arb_result = self.check_correlation_divergence(ind)
             if arb_result is None:
                 arb_result = self.check_volatility_squeeze(ind)
@@ -246,6 +264,7 @@ class ArbitrageAgent:
         reload_counter = 0
         while self.running:
             try:
+                await self.redis.heartbeat("strategy-arbitrage")
                 messages = await self.redis.read_stream(settings.STREAM_INDICATORS, group, consumer, count=10, block=5000)
                 for msg_id, data in messages:
                     try:

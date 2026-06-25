@@ -336,8 +336,7 @@ class QwenAnalyzer:
 
     async def analyze_quick(self, req: AnalyzeRequest) -> Optional[dict]:
         prompt = self.build_quick_prompt(req)
-        async with self._lock:
-            result = await self.query_ollama(prompt, system=MINI_PROMPT, timeout=15.0, retries=0)
+        result = await self.query_ollama(prompt, system=MINI_PROMPT, timeout=15.0, retries=0)
         if result is None:
             return {"signal": "hold", "confidence": 0.3, "reasoning": "Qwen analysis unavailable"}
         return result
@@ -346,6 +345,7 @@ class QwenAnalyzer:
         logger.info("Starting background analyzer loop")
         group = "qwen-analyzer"
         consumer = f"analyzer-{uuid.uuid4().hex[:8]}"
+        feedback_reload_count = 0
         while self.running:
             try:
                 self._gpu_load = self.get_gpu_load()
@@ -353,11 +353,7 @@ class QwenAnalyzer:
                 batch_size = self.get_batch_size()
                 sleep_s = self.get_sleep_seconds()
 
-                await self.redis.client.set("llm:degradation_level", json.dumps({
-                    "level": self._degradation_level,
-                    "gpu_load": round(self._gpu_load, 3),
-                    "batch_size": batch_size,
-                }))
+                await self.redis.heartbeat("qwen-analyzer")
 
                 messages = await self.redis.read_stream(settings.STREAM_INDICATORS, group, consumer, count=batch_size, block=5000)
                 for msg_id, data in messages:
@@ -368,6 +364,9 @@ class QwenAnalyzer:
                             asyncio.create_task(self.analyze_indicators(indicators))
                     except Exception as e:
                         logger.error(f"Error processing indicator message: {e}")
+                feedback_reload_count += 1
+                if feedback_reload_count % 10 == 0:
+                    asyncio.create_task(self.load_feedback_context())
                 await asyncio.sleep(sleep_s)
             except asyncio.CancelledError:
                 break

@@ -256,8 +256,12 @@ class RiskManager:
             if circuit_data.get("status") == "tripped":
                 resume_at = circuit_data.get("resume_at", "")
                 if resume_at > datetime.now(timezone.utc).isoformat():
-                    approved = False
-                    reasons.append(f"Circuit breaker active: {circuit_data.get('reason')} (resumes {resume_at})")
+                    if signal.confidence >= 0.90:
+                        position_multiplier *= 0.5
+                        reasons.append(f"Circuit breaker bypass (confidence {signal.confidence:.0%} >= 90%, size=50%)")
+                    else:
+                        approved = False
+                        reasons.append(f"Circuit breaker active: {circuit_data.get('reason')} (resumes {resume_at})")
 
         has_position_in_symbol = any(
             p.get("symbol") == signal.symbol for p in self.open_positions.values()
@@ -452,6 +456,7 @@ class RiskManager:
         logger.info("Risk Manager running")
         while self.running:
             try:
+                await self.redis.heartbeat("risk-manager")
                 messages = await self.redis.read_stream(
                     settings.STREAM_SIGNALS, signal_group, signal_consumer, count=10, block=2000,
                 )

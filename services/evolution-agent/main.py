@@ -80,6 +80,9 @@ class EvolutionAgent:
         backtest = await self.redis.get_json("backtest:latest")
         snapshot["backtest"] = backtest or {}
 
+        nautilus = await self.redis.get_json("nautilus:latest")
+        snapshot["nautilus"] = nautilus or {}
+
         training = await self.redis.get_json("training:export_stats")
         snapshot["training"] = training or {}
 
@@ -283,23 +286,23 @@ class EvolutionAgent:
                 "rsi_overbought_weak": [60, 65],
                 "bb_position_low": [0.10, 0.20],
                 "bb_position_high": [0.80, 0.90],
-                "atr_sl_multiplier": [1.0, 1.5],
-                "atr_tp_multiplier": [2.0, 3.0],
+                "atr_sl_multiplier": [1.0, 1.2],
+                "atr_tp_multiplier": [3.0, 4.0],
                 "min_score": [2, 3],
             }
         elif strategy == "swing":
             return {
                 "rsi_oversold": [25, 30, 35],
                 "rsi_overbought": [65, 70, 75],
-                "atr_sl_multiplier": [1.0, 1.5, 2.0],
-                "atr_tp_multiplier": [2.0, 3.0, 4.0],
+                "atr_sl_multiplier": [1.0, 1.5],
+                "atr_tp_multiplier": [3.0, 4.0],
             }
         elif strategy == "arbitrage":
             return {
                 "bb_position_low": [0.03, 0.05, 0.08],
                 "bb_position_high": [0.92, 0.95, 0.97],
-                "atr_sl_multiplier": [0.8, 1.0, 1.5],
-                "atr_tp_multiplier": [1.5, 2.0, 2.5],
+                "atr_sl_multiplier": [0.8, 1.0],
+                "atr_tp_multiplier": [2.5, 3.5],
             }
         return {}
 
@@ -712,6 +715,7 @@ Analyze the system performance and propose up to 5 specific changes to improve p
 
         while self.running:
             try:
+                await self.redis.heartbeat("evolution-agent")
                 await self.run_cycle()
                 await asyncio.sleep(CYCLE_INTERVAL)
             except asyncio.CancelledError:

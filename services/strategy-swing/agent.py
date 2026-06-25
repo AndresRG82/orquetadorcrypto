@@ -17,6 +17,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(name)s] %(levelna
 logger = logging.getLogger("strategy-swing")
 
 SWING_TIMEFRAMES = {"1h", "4h", "1d"}
+ALLOWED_REGIMES = {"trending_up", "trending_down"}
 
 
 class SwingAgent:
@@ -47,6 +48,18 @@ class SwingAgent:
         }
         self.params = {**defaults, **(stored or {}), **(config or {})}
         logger.info(f"Swing params loaded: sl_mult={self.params['atr_sl_multiplier']} tp_mult={self.params['atr_tp_multiplier']}")
+
+    async def _check_regime(self) -> bool:
+        try:
+            regime_data = await self.redis.get_json("market:regime")
+            if regime_data:
+                regime = regime_data.get("regime")
+                if regime and regime not in ALLOWED_REGIMES:
+                    logger.info(f"Regime '{regime}' not allowed for swing, skipping")
+                    return False
+        except Exception:
+            pass
+        return True
 
     def evaluate_technicals(self, ind: TechnicalIndicators) -> Optional[dict]:
         score = 0
@@ -171,6 +184,10 @@ class SwingAgent:
             if ind.timeframe not in SWING_TIMEFRAMES:
                 return
 
+            regime_allowed = await self._check_regime()
+            if not regime_allowed:
+                return
+
             tech_result = self.evaluate_technicals(ind)
 
             if self.params.get("alpha_zoo_enabled", True):
@@ -271,6 +288,7 @@ class SwingAgent:
         reload_counter = 0
         while self.running:
             try:
+                await self.redis.heartbeat("strategy-swing")
                 messages = await self.redis.read_stream(
                     settings.STREAM_INDICATORS, group, consumer, count=10, block=5000,
                 )

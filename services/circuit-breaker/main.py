@@ -18,14 +18,14 @@ logger = logging.getLogger("circuit-breaker")
 CHECK_INTERVAL = 10
 
 RULES = {
-    "consecutive_losses": 5,
+    "consecutive_losses": 7,
     "loss_rate_window_min": 10,
-    "loss_rate_threshold": 0.50,
+    "loss_rate_threshold": 0.60,
     "drawdown_window_min": 5,
-    "drawdown_threshold": 0.02,
+    "drawdown_threshold": 0.05,
     "signal_spike_factor": 5,
-    "pause_duration_min": 60,
-    "critical_pause_min": 120,
+    "pause_duration_min": 20,
+    "critical_pause_min": 45,
     "history_max": 50,
 }
 

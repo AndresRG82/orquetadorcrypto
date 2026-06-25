@@ -194,6 +194,7 @@ class MockMarketScanner:
         while self.running:
             tasks = [self.fetch_and_publish(pair, timeframe) for pair in settings.TOP_PAIRS]
             await asyncio.gather(*tasks, return_exceptions=True)
+            await self.redis.heartbeat("market-scanner")
             logger.debug(f"Mock scan complete for {timeframe}, {len(settings.TOP_PAIRS)} pairs")
             await asyncio.sleep(interval)
 

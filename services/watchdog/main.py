@@ -25,13 +25,6 @@ CONSUMER_MAP = {
         "consumers": {
             "orchestrator-market": "crypto-trader-orchestrator-1",
             "paper-trading-market-main": "crypto-trader-paper-trading-1",
-            "paper-trading-market-highconf": "crypto-trader-pt-highconf-1",
-            "paper-trading-market-main-tf": "crypto-trader-pt-main-tf-1",
-            "paper-trading-market-conservative-tf": "crypto-trader-pt-conservative-tf-1",
-            "paper-trading-market-highconf-tf": "crypto-trader-pt-highconf-tf-1",
-            "paper-trading-market-multitf-tf": "crypto-trader-pt-multitf-tf-1",
-            "paper-trading-market-lowfreq-tf": "crypto-trader-pt-lowfreq-tf-1",
-            "paper-trading-market-sentiment-tf": "crypto-trader-pt-sentiment-tf-1",
             "stop-loss-market": "crypto-trader-stop-loss-1",
         },
     },
@@ -44,7 +37,6 @@ CONSUMER_MAP = {
         "consumers": {
             "risk-manager-signals": "crypto-trader-risk-manager-1",
             "orchestrator-signals": "crypto-trader-orchestrator-1",
-            "strategy-router": "crypto-trader-strategy-router-1",
         },
     },
     "risk:approved": {
@@ -57,13 +49,6 @@ CONSUMER_MAP = {
         "producer": "crypto-trader-risk-manager-1",
         "consumers": {
             "paper-trading-orders-main": "crypto-trader-paper-trading-1",
-            "paper-trading-orders-highconf": "crypto-trader-pt-highconf-1",
-            "paper-trading-orders-main-tf": "crypto-trader-pt-main-tf-1",
-            "paper-trading-orders-conservative-tf": "crypto-trader-pt-conservative-tf-1",
-            "paper-trading-orders-highconf-tf": "crypto-trader-pt-highconf-tf-1",
-            "paper-trading-orders-multitf-tf": "crypto-trader-pt-multitf-tf-1",
-            "paper-trading-orders-lowfreq-tf": "crypto-trader-pt-lowfreq-tf-1",
-            "paper-trading-orders-sentiment-tf": "crypto-trader-pt-sentiment-tf-1",
         },
     },
     "trade:results": {
@@ -219,6 +204,7 @@ class Watchdog:
 
         while True:
             try:
+                await self.redis.set(f"service:heartbeat:watchdog", json.dumps({"last_seen": datetime.now(timezone.utc).isoformat()}))
                 logger.info("--- Check cycle ---")
                 await self.check_consumers()
                 await self.check_streams()

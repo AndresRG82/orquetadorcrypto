@@ -25,6 +25,13 @@ REGIME_STRATEGY_MAP = {
     "volatile": [],
 }
 
+RISK_EXCLUDED_SYMBOLS = {
+    "volatile": ["DOGE/USDT", "PEPE/USDT", "ARB/USDT", "OP/USDT", "APT/USDT", "SUI/USDT", "FIL/USDT"],
+    "trending_down": ["PEPE/USDT", "ARB/USDT", "OP/USDT", "FIL/USDT"],
+    "trending_up": [],
+    "ranging": [],
+}
+
 
 class RegimeDetector:
     def __init__(self):
@@ -73,11 +80,16 @@ class RegimeDetector:
             }
 
             await self.redis.client.set("market:regime", json.dumps(market_regime))
+
+            excluded = RISK_EXCLUDED_SYMBOLS.get(market_regime["regime"], [])
+            await self.redis.client.set("risk:excluded_symbols", json.dumps(excluded))
+
             logger.info(
                 f"Market regime: {market_regime['regime']} "
                 f"(confidence={market_regime['confidence']:.2f}, "
                 f"volatility={market_regime['volatility']:.3f})"
             )
+            logger.info(f"Risk excluded symbols ({market_regime['regime']}): {excluded}")
 
     async def _update_indicator_cache(self):
         try:

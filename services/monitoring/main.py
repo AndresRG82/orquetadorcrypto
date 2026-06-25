@@ -49,6 +49,7 @@ class MonitoringService:
         logger.info("Monitoring service running")
         while self.running:
             try:
+                await self.redis.heartbeat("monitoring")
                 now = time.time()
 
                 if now - self.last_metrics_time >= MONITOR_INTERVALS["metrics"]:

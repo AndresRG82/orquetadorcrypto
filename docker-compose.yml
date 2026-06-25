@@ -88,10 +88,17 @@ services:
     environment:
       REDIS_HOST: redis
       REDIS_PORT: 6379
+      DB_HOST: timescaledb
+      DB_PORT: 5432
+      DB_NAME: ${TIMESCALE_DB:-trader}
+      DB_USER: ${TIMESCALE_USER:-trader}
+      DB_PASSWORD: ${TIMESCALE_PASSWORD:-trader123}
       QWEN_ANALYZER_URL: http://qwen-analyzer:8000
       STRATEGY: scalping
     depends_on:
       redis:
+        condition: service_healthy
+      timescaledb:
         condition: service_healthy
     restart: unless-stopped
     networks:
@@ -104,10 +111,17 @@ services:
     environment:
       REDIS_HOST: redis
       REDIS_PORT: 6379
+      DB_HOST: timescaledb
+      DB_PORT: 5432
+      DB_NAME: ${TIMESCALE_DB:-trader}
+      DB_USER: ${TIMESCALE_USER:-trader}
+      DB_PASSWORD: ${TIMESCALE_PASSWORD:-trader123}
       QWEN_ANALYZER_URL: http://qwen-analyzer:8000
       STRATEGY: swing
     depends_on:
       redis:
+        condition: service_healthy
+      timescaledb:
         condition: service_healthy
     restart: unless-stopped
     networks:
@@ -120,10 +134,17 @@ services:
     environment:
       REDIS_HOST: redis
       REDIS_PORT: 6379
+      DB_HOST: timescaledb
+      DB_PORT: 5432
+      DB_NAME: ${TIMESCALE_DB:-trader}
+      DB_USER: ${TIMESCALE_USER:-trader}
+      DB_PASSWORD: ${TIMESCALE_PASSWORD:-trader123}
       QWEN_ANALYZER_URL: http://qwen-analyzer:8000
       STRATEGY: arbitrage
     depends_on:
       redis:
+        condition: service_healthy
+      timescaledb:
         condition: service_healthy
     restart: unless-stopped
     networks:
@@ -195,6 +216,8 @@ services:
       PT_INSTANCE: main
       PT_STATE_KEY: paper_trading:state
       PT_STATS_KEY: portfolio:stats
+      BYBIT_API_2_KEY: ${BYBIT_API_KEY}
+      BYBIT_API_2_SECRET: ${BYBIT_API_SECRET}
     depends_on:
       redis:
         condition: service_healthy
@@ -203,592 +226,6 @@ services:
     restart: unless-stopped
     networks:
       - trader-net
-
-  pt-conservative:
-    build:
-      context: .
-      dockerfile: services/paper-trading/Dockerfile
-    environment:
-      REDIS_HOST: redis
-      REDIS_PORT: 6379
-      DB_HOST: timescaledb
-      DB_PORT: 5432
-      DB_NAME: ${TIMESCALE_DB:-trader}
-      DB_USER: ${TIMESCALE_USER:-trader}
-      DB_PASSWORD: ${TIMESCALE_PASSWORD:-trader123}
-      SLIPPAGE_PCT: ${SLIPPAGE_PCT:-0.001}
-      TRADING_FEE_PCT: ${TRADING_FEE_PCT:-0.00075}
-      INITIAL_CAPITAL: 1000.0
-      BASE_CURRENCY: USDT
-      PT_INSTANCE: conservative
-      PT_STATE_KEY: paper_trading:conservative
-      PT_STATS_KEY: portfolio:stats:conservative
-      PT_MIN_CONFIDENCE: "0.80"
-      PT_MAX_POSITION_PCT: "0.10"
-    depends_on:
-      redis:
-        condition: service_healthy
-      timescaledb:
-        condition: service_healthy
-    restart: unless-stopped
-    networks:
-      - trader-net
-    profiles: ["disabled"]
-
-  pt-aggressive:
-    build:
-      context: .
-      dockerfile: services/paper-trading/Dockerfile
-    environment:
-      REDIS_HOST: redis
-      REDIS_PORT: 6379
-      DB_HOST: timescaledb
-      DB_PORT: 5432
-      DB_NAME: ${TIMESCALE_DB:-trader}
-      DB_USER: ${TIMESCALE_USER:-trader}
-      DB_PASSWORD: ${TIMESCALE_PASSWORD:-trader123}
-      SLIPPAGE_PCT: ${SLIPPAGE_PCT:-0.001}
-      TRADING_FEE_PCT: ${TRADING_FEE_PCT:-0.00075}
-      INITIAL_CAPITAL: 1000.0
-      BASE_CURRENCY: USDT
-      PT_INSTANCE: aggressive
-      PT_STATE_KEY: paper_trading:aggressive
-      PT_STATS_KEY: portfolio:stats:aggressive
-      PT_MIN_CONFIDENCE: "0.50"
-      PT_MAX_POSITION_PCT: "0.25"
-      PT_TIME_FILTER: "5,6,8,17,22"
-    depends_on:
-      redis:
-        condition: service_healthy
-      timescaledb:
-        condition: service_healthy
-    restart: unless-stopped
-    networks:
-      - trader-net
-    profiles: ["disabled"]
-
-  pt-scalping:
-    build:
-      context: .
-      dockerfile: services/paper-trading/Dockerfile
-    environment:
-      REDIS_HOST: redis
-      REDIS_PORT: 6379
-      DB_HOST: timescaledb
-      DB_PORT: 5432
-      DB_NAME: ${TIMESCALE_DB:-trader}
-      DB_USER: ${TIMESCALE_USER:-trader}
-      DB_PASSWORD: ${TIMESCALE_PASSWORD:-trader123}
-      SLIPPAGE_PCT: ${SLIPPAGE_PCT:-0.001}
-      TRADING_FEE_PCT: ${TRADING_FEE_PCT:-0.00075}
-      INITIAL_CAPITAL: 1000.0
-      BASE_CURRENCY: USDT
-      PT_INSTANCE: scalping
-      PT_STATE_KEY: paper_trading:scalping
-      PT_STATS_KEY: portfolio:stats:scalping
-      PT_STRATEGY_FILTER: scalping
-      PT_TIME_FILTER: "5,6,8,17,22"
-    depends_on:
-      redis:
-        condition: service_healthy
-      timescaledb:
-        condition: service_healthy
-    restart: unless-stopped
-    networks:
-      - trader-net
-    profiles: ["disabled"]
-
-  pt-swing:
-    build:
-      context: .
-      dockerfile: services/paper-trading/Dockerfile
-    environment:
-      REDIS_HOST: redis
-      REDIS_PORT: 6379
-      DB_HOST: timescaledb
-      DB_PORT: 5432
-      DB_NAME: ${TIMESCALE_DB:-trader}
-      DB_USER: ${TIMESCALE_USER:-trader}
-      DB_PASSWORD: ${TIMESCALE_PASSWORD:-trader123}
-      SLIPPAGE_PCT: ${SLIPPAGE_PCT:-0.001}
-      TRADING_FEE_PCT: ${TRADING_FEE_PCT:-0.00075}
-      INITIAL_CAPITAL: 1000.0
-      BASE_CURRENCY: USDT
-      PT_INSTANCE: swing
-      PT_STATE_KEY: paper_trading:swing
-      PT_STATS_KEY: portfolio:stats:swing
-      PT_STRATEGY_FILTER: swing
-    depends_on:
-      redis:
-        condition: service_healthy
-      timescaledb:
-        condition: service_healthy
-    restart: unless-stopped
-    networks:
-      - trader-net
-    profiles: ["disabled"]
-
-  pt-highconf:
-    build:
-      context: .
-      dockerfile: services/paper-trading/Dockerfile
-    environment:
-      REDIS_HOST: redis
-      REDIS_PORT: 6379
-      DB_HOST: timescaledb
-      DB_PORT: 5432
-      DB_NAME: ${TIMESCALE_DB:-trader}
-      DB_USER: ${TIMESCALE_USER:-trader}
-      DB_PASSWORD: ${TIMESCALE_PASSWORD:-trader123}
-      SLIPPAGE_PCT: ${SLIPPAGE_PCT:-0.001}
-      TRADING_FEE_PCT: ${TRADING_FEE_PCT:-0.00075}
-      INITIAL_CAPITAL: 1000.0
-      BASE_CURRENCY: USDT
-      PT_INSTANCE: highconf
-      PT_STATE_KEY: paper_trading:highconf
-      PT_STATS_KEY: portfolio:stats:highconf
-      PT_MIN_CONFIDENCE: "0.90"
-      PT_MAX_POSITION_PCT: "0.20"
-    depends_on:
-      redis:
-        condition: service_healthy
-      timescaledb:
-        condition: service_healthy
-    restart: unless-stopped
-    networks:
-      - trader-net
-
-  pt-multitf:
-    build:
-      context: .
-      dockerfile: services/paper-trading/Dockerfile
-    environment:
-      REDIS_HOST: redis
-      REDIS_PORT: 6379
-      DB_HOST: timescaledb
-      DB_PORT: 5432
-      DB_NAME: ${TIMESCALE_DB:-trader}
-      DB_USER: ${TIMESCALE_USER:-trader}
-      DB_PASSWORD: ${TIMESCALE_PASSWORD:-trader123}
-      SLIPPAGE_PCT: ${SLIPPAGE_PCT:-0.001}
-      TRADING_FEE_PCT: ${TRADING_FEE_PCT:-0.00075}
-      INITIAL_CAPITAL: 1000.0
-      BASE_CURRENCY: USDT
-      PT_INSTANCE: multitf
-      PT_STATE_KEY: paper_trading:multitf
-      PT_STATS_KEY: portfolio:stats:multitf
-      PT_TIMEFRAME_FILTER: "5m,15m"
-    depends_on:
-      redis:
-        condition: service_healthy
-      timescaledb:
-        condition: service_healthy
-    restart: unless-stopped
-    networks:
-      - trader-net
-    profiles: ["disabled"]
-
-  pt-meanrev:
-    build:
-      context: .
-      dockerfile: services/paper-trading/Dockerfile
-    environment:
-      REDIS_HOST: redis
-      REDIS_PORT: 6379
-      DB_HOST: timescaledb
-      DB_PORT: 5432
-      DB_NAME: ${TIMESCALE_DB:-trader}
-      DB_USER: ${TIMESCALE_USER:-trader}
-      DB_PASSWORD: ${TIMESCALE_PASSWORD:-trader123}
-      SLIPPAGE_PCT: ${SLIPPAGE_PCT:-0.001}
-      TRADING_FEE_PCT: ${TRADING_FEE_PCT:-0.00075}
-      INITIAL_CAPITAL: 1000.0
-      BASE_CURRENCY: USDT
-      PT_INSTANCE: meanrev
-      PT_STATE_KEY: paper_trading:meanrev
-      PT_STATS_KEY: portfolio:stats:meanrev
-      PT_STRATEGY_FILTER: "scalping"
-      PT_MIN_CONFIDENCE: "0.70"
-      PT_TIME_FILTER: "5,6,8,17,22"
-    depends_on:
-      redis:
-        condition: service_healthy
-      timescaledb:
-        condition: service_healthy
-    restart: unless-stopped
-    networks:
-      - trader-net
-    profiles: ["disabled"]
-
-  pt-lowfreq:
-    build:
-      context: .
-      dockerfile: services/paper-trading/Dockerfile
-    environment:
-      REDIS_HOST: redis
-      REDIS_PORT: 6379
-      DB_HOST: timescaledb
-      DB_PORT: 5432
-      DB_NAME: ${TIMESCALE_DB:-trader}
-      DB_USER: ${TIMESCALE_USER:-trader}
-      DB_PASSWORD: ${TIMESCALE_PASSWORD:-trader123}
-      SLIPPAGE_PCT: ${SLIPPAGE_PCT:-0.001}
-      TRADING_FEE_PCT: ${TRADING_FEE_PCT:-0.00075}
-      INITIAL_CAPITAL: 1000.0
-      BASE_CURRENCY: USDT
-      PT_INSTANCE: lowfreq
-      PT_STATE_KEY: paper_trading:lowfreq
-      PT_STATS_KEY: portfolio:stats:lowfreq
-      PT_MAX_TRADES_PER_DAY: "1"
-      PT_MIN_CONFIDENCE: "0.70"
-      PT_MAX_POSITION_PCT: "0.30"
-    depends_on:
-      redis:
-        condition: service_healthy
-      timescaledb:
-        condition: service_healthy
-    restart: unless-stopped
-    networks:
-      - trader-net
-    profiles: ["disabled"]
-
-  pt-sentiment:
-    build:
-      context: .
-      dockerfile: services/paper-trading/Dockerfile
-    environment:
-      REDIS_HOST: redis
-      REDIS_PORT: 6379
-      DB_HOST: timescaledb
-      DB_PORT: 5432
-      DB_NAME: ${TIMESCALE_DB:-trader}
-      DB_USER: ${TIMESCALE_USER:-trader}
-      DB_PASSWORD: ${TIMESCALE_PASSWORD:-trader123}
-      SLIPPAGE_PCT: ${SLIPPAGE_PCT:-0.001}
-      TRADING_FEE_PCT: ${TRADING_FEE_PCT:-0.00075}
-      INITIAL_CAPITAL: 1000.0
-      BASE_CURRENCY: USDT
-      PT_INSTANCE: sentiment
-      PT_STATE_KEY: paper_trading:sentiment
-      PT_STATS_KEY: portfolio:stats:sentiment
-      PT_SENTIMENT_GATED: "fear"
-      PT_SENTIMENT_THRESHOLD: "25"
-    depends_on:
-      redis:
-        condition: service_healthy
-      timescaledb:
-        condition: service_healthy
-    restart: unless-stopped
-    networks:
-      - trader-net
-    profiles: ["disabled"]
-
-  # ===== A/B TEST: Time Filter Instances =====
-  pt-main-tf:
-    build:
-      context: .
-      dockerfile: services/paper-trading/Dockerfile
-    environment:
-      REDIS_HOST: redis
-      REDIS_PORT: 6379
-      DB_HOST: timescaledb
-      DB_PORT: 5432
-      DB_NAME: ${TIMESCALE_DB:-trader}
-      DB_USER: ${TIMESCALE_USER:-trader}
-      DB_PASSWORD: ${TIMESCALE_PASSWORD:-trader123}
-      SLIPPAGE_PCT: ${SLIPPAGE_PCT:-0.001}
-      TRADING_FEE_PCT: ${TRADING_FEE_PCT:-0.00075}
-      INITIAL_CAPITAL: 1000.0
-      BASE_CURRENCY: USDT
-      PT_INSTANCE: main-tf
-      PT_STATE_KEY: paper_trading:main-tf
-      PT_STATS_KEY: portfolio:stats:main-tf
-      PT_TIME_FILTER: "5,6,8,17,22"
-    depends_on:
-      redis:
-        condition: service_healthy
-      timescaledb:
-        condition: service_healthy
-    restart: unless-stopped
-    networks:
-      - trader-net
-
-  pt-conservative-tf:
-    build:
-      context: .
-      dockerfile: services/paper-trading/Dockerfile
-    environment:
-      REDIS_HOST: redis
-      REDIS_PORT: 6379
-      DB_HOST: timescaledb
-      DB_PORT: 5432
-      DB_NAME: ${TIMESCALE_DB:-trader}
-      DB_USER: ${TIMESCALE_USER:-trader}
-      DB_PASSWORD: ${TIMESCALE_PASSWORD:-trader123}
-      SLIPPAGE_PCT: ${SLIPPAGE_PCT:-0.001}
-      TRADING_FEE_PCT: ${TRADING_FEE_PCT:-0.00075}
-      INITIAL_CAPITAL: 1000.0
-      BASE_CURRENCY: USDT
-      PT_INSTANCE: conservative-tf
-      PT_STATE_KEY: paper_trading:conservative-tf
-      PT_STATS_KEY: portfolio:stats:conservative-tf
-      PT_MIN_CONFIDENCE: "0.70"
-      PT_MAX_TRADES_PER_DAY: "20"
-      PT_TIME_FILTER: "5,6,8,17,22"
-    depends_on:
-      redis:
-        condition: service_healthy
-      timescaledb:
-        condition: service_healthy
-    restart: unless-stopped
-    networks:
-      - trader-net
-
-  pt-swing-tf:
-    build:
-      context: .
-      dockerfile: services/paper-trading/Dockerfile
-    environment:
-      REDIS_HOST: redis
-      REDIS_PORT: 6379
-      DB_HOST: timescaledb
-      DB_PORT: 5432
-      DB_NAME: ${TIMESCALE_DB:-trader}
-      DB_USER: ${TIMESCALE_USER:-trader}
-      DB_PASSWORD: ${TIMESCALE_PASSWORD:-trader123}
-      SLIPPAGE_PCT: ${SLIPPAGE_PCT:-0.001}
-      TRADING_FEE_PCT: ${TRADING_FEE_PCT:-0.00075}
-      INITIAL_CAPITAL: 1000.0
-      BASE_CURRENCY: USDT
-      PT_INSTANCE: swing-tf
-      PT_STATE_KEY: paper_trading:swing-tf
-      PT_STATS_KEY: portfolio:stats:swing-tf
-      PT_STRATEGY_FILTER: "swing"
-      PT_TIME_FILTER: "5,6,8,17,22"
-    depends_on:
-      redis:
-        condition: service_healthy
-      timescaledb:
-        condition: service_healthy
-    restart: unless-stopped
-    networks:
-      - trader-net
-    profiles: ["disabled"]
-
-  pt-highconf-tf:
-    build:
-      context: .
-      dockerfile: services/paper-trading/Dockerfile
-    environment:
-      REDIS_HOST: redis
-      REDIS_PORT: 6379
-      DB_HOST: timescaledb
-      DB_PORT: 5432
-      DB_NAME: ${TIMESCALE_DB:-trader}
-      DB_USER: ${TIMESCALE_USER:-trader}
-      DB_PASSWORD: ${TIMESCALE_PASSWORD:-trader123}
-      SLIPPAGE_PCT: ${SLIPPAGE_PCT:-0.001}
-      TRADING_FEE_PCT: ${TRADING_FEE_PCT:-0.00075}
-      INITIAL_CAPITAL: 1000.0
-      BASE_CURRENCY: USDT
-      PT_INSTANCE: highconf-tf
-      PT_STATE_KEY: paper_trading:highconf-tf
-      PT_STATS_KEY: portfolio:stats:highconf-tf
-      PT_MIN_CONFIDENCE: "0.75"
-      PT_TIME_FILTER: "5,6,8,17,22"
-    depends_on:
-      redis:
-        condition: service_healthy
-      timescaledb:
-        condition: service_healthy
-    restart: unless-stopped
-    networks:
-      - trader-net
-
-  pt-multitf-tf:
-    build:
-      context: .
-      dockerfile: services/paper-trading/Dockerfile
-    environment:
-      REDIS_HOST: redis
-      REDIS_PORT: 6379
-      DB_HOST: timescaledb
-      DB_PORT: 5432
-      DB_NAME: ${TIMESCALE_DB:-trader}
-      DB_USER: ${TIMESCALE_USER:-trader}
-      DB_PASSWORD: ${TIMESCALE_PASSWORD:-trader123}
-      SLIPPAGE_PCT: ${SLIPPAGE_PCT:-0.001}
-      TRADING_FEE_PCT: ${TRADING_FEE_PCT:-0.00075}
-      INITIAL_CAPITAL: 1000.0
-      BASE_CURRENCY: USDT
-      PT_INSTANCE: multitf-tf
-      PT_STATE_KEY: paper_trading:multitf-tf
-      PT_STATS_KEY: portfolio:stats:multitf-tf
-      PT_TIMEFRAME_FILTER: "5m,15m,1h,4h"
-      PT_TIME_FILTER: "5,6,8,17,22"
-    depends_on:
-      redis:
-        condition: service_healthy
-      timescaledb:
-        condition: service_healthy
-    restart: unless-stopped
-    networks:
-      - trader-net
-
-  pt-lowfreq-tf:
-    build:
-      context: .
-      dockerfile: services/paper-trading/Dockerfile
-    environment:
-      REDIS_HOST: redis
-      REDIS_PORT: 6379
-      DB_HOST: timescaledb
-      DB_PORT: 5432
-      DB_NAME: ${TIMESCALE_DB:-trader}
-      DB_USER: ${TIMESCALE_USER:-trader}
-      DB_PASSWORD: ${TIMESCALE_PASSWORD:-trader123}
-      SLIPPAGE_PCT: ${SLIPPAGE_PCT:-0.001}
-      TRADING_FEE_PCT: ${TRADING_FEE_PCT:-0.00075}
-      INITIAL_CAPITAL: 1000.0
-      BASE_CURRENCY: USDT
-      PT_INSTANCE: lowfreq-tf
-      PT_STATE_KEY: paper_trading:lowfreq-tf
-      PT_STATS_KEY: portfolio:stats:lowfreq-tf
-      PT_MAX_TRADES_PER_DAY: "1"
-      PT_MIN_CONFIDENCE: "0.70"
-      PT_TIME_FILTER: "5,6,8,17,22"
-    depends_on:
-      redis:
-        condition: service_healthy
-      timescaledb:
-        condition: service_healthy
-    restart: unless-stopped
-    networks:
-      - trader-net
-
-  pt-sentiment-tf:
-    build:
-      context: .
-      dockerfile: services/paper-trading/Dockerfile
-    environment:
-      REDIS_HOST: redis
-      REDIS_PORT: 6379
-      DB_HOST: timescaledb
-      DB_PORT: 5432
-      DB_NAME: ${TIMESCALE_DB:-trader}
-      DB_USER: ${TIMESCALE_USER:-trader}
-      DB_PASSWORD: ${TIMESCALE_PASSWORD:-trader123}
-      SLIPPAGE_PCT: ${SLIPPAGE_PCT:-0.001}
-      TRADING_FEE_PCT: ${TRADING_FEE_PCT:-0.00075}
-      INITIAL_CAPITAL: 1000.0
-      BASE_CURRENCY: USDT
-      PT_INSTANCE: sentiment-tf
-      PT_STATE_KEY: paper_trading:sentiment-tf
-      PT_STATS_KEY: portfolio:stats:sentiment-tf
-      PT_SENTIMENT_GATED: "fear"
-      PT_SENTIMENT_THRESHOLD: "25"
-      PT_TIME_FILTER: "5,6,8,17,22"
-    depends_on:
-      redis:
-        condition: service_healthy
-      timescaledb:
-        condition: service_healthy
-    restart: unless-stopped
-    networks:
-      - trader-net
-
-  pt-aggressive-notf:
-    build:
-      context: .
-      dockerfile: services/paper-trading/Dockerfile
-    environment:
-      REDIS_HOST: redis
-      REDIS_PORT: 6379
-      DB_HOST: timescaledb
-      DB_PORT: 5432
-      DB_NAME: ${TIMESCALE_DB:-trader}
-      DB_USER: ${TIMESCALE_USER:-trader}
-      DB_PASSWORD: ${TIMESCALE_PASSWORD:-trader123}
-      SLIPPAGE_PCT: ${SLIPPAGE_PCT:-0.001}
-      TRADING_FEE_PCT: ${TRADING_FEE_PCT:-0.00075}
-      INITIAL_CAPITAL: 1000.0
-      BASE_CURRENCY: USDT
-      PT_INSTANCE: aggressive-notf
-      PT_STATE_KEY: paper_trading:aggressive-notf
-      PT_STATS_KEY: portfolio:stats:aggressive-notf
-      PT_MIN_CONFIDENCE: "0.50"
-      PT_MAX_POSITION_PCT: "0.25"
-    depends_on:
-      redis:
-        condition: service_healthy
-      timescaledb:
-        condition: service_healthy
-    restart: unless-stopped
-    networks:
-      - trader-net
-    profiles: ["disabled"]
-
-  pt-scalping-notf:
-    build:
-      context: .
-      dockerfile: services/paper-trading/Dockerfile
-    environment:
-      REDIS_HOST: redis
-      REDIS_PORT: 6379
-      DB_HOST: timescaledb
-      DB_PORT: 5432
-      DB_NAME: ${TIMESCALE_DB:-trader}
-      DB_USER: ${TIMESCALE_USER:-trader}
-      DB_PASSWORD: ${TIMESCALE_PASSWORD:-trader123}
-      SLIPPAGE_PCT: ${SLIPPAGE_PCT:-0.001}
-      TRADING_FEE_PCT: ${TRADING_FEE_PCT:-0.00075}
-      INITIAL_CAPITAL: 1000.0
-      BASE_CURRENCY: USDT
-      PT_INSTANCE: scalping-notf
-      PT_STATE_KEY: paper_trading:scalping-notf
-      PT_STATS_KEY: portfolio:stats:scalping-notf
-      PT_STRATEGY_FILTER: scalping
-    depends_on:
-      redis:
-        condition: service_healthy
-      timescaledb:
-        condition: service_healthy
-    restart: unless-stopped
-    networks:
-      - trader-net
-    profiles: ["disabled"]
-
-  pt-meanrev-notf:
-    build:
-      context: .
-      dockerfile: services/paper-trading/Dockerfile
-    environment:
-      REDIS_HOST: redis
-      REDIS_PORT: 6379
-      DB_HOST: timescaledb
-      DB_PORT: 5432
-      DB_NAME: ${TIMESCALE_DB:-trader}
-      DB_USER: ${TIMESCALE_USER:-trader}
-      DB_PASSWORD: ${TIMESCALE_PASSWORD:-trader123}
-      SLIPPAGE_PCT: ${SLIPPAGE_PCT:-0.001}
-      TRADING_FEE_PCT: ${TRADING_FEE_PCT:-0.00075}
-      INITIAL_CAPITAL: 1000.0
-      BASE_CURRENCY: USDT
-      PT_INSTANCE: meanrev-notf
-      PT_STATE_KEY: paper_trading:meanrev-notf
-      PT_STATS_KEY: portfolio:stats:meanrev-notf
-      PT_STRATEGY_FILTER: "scalping"
-      PT_MIN_CONFIDENCE: "0.70"
-    depends_on:
-      redis:
-        condition: service_healthy
-      timescaledb:
-        condition: service_healthy
-    restart: unless-stopped
-    networks:
-      - trader-net
-    profiles: ["disabled"]
-
   dashboard:
     build:
       context: .
@@ -852,7 +289,6 @@ services:
     restart: unless-stopped
     networks:
       - trader-net
-
   stop-loss-tracker:
     build:
       context: .
@@ -873,7 +309,6 @@ services:
     restart: unless-stopped
     networks:
       - trader-net
-
   feedback:
     build:
       context: .
@@ -899,6 +334,7 @@ services:
     networks:
       - trader-net
     command: ["python", "/app/service/feedback.py"]
+    profiles: ["disabled"]
 
   strategy-router:
     build:
@@ -920,6 +356,7 @@ services:
     restart: unless-stopped
     networks:
       - trader-net
+    profiles: ["disabled"]
 
   sentiment:
     build:
@@ -934,6 +371,7 @@ services:
     restart: unless-stopped
     networks:
       - trader-net
+    profiles: ["disabled"]
 
   backtesting:
     build:
@@ -957,7 +395,6 @@ services:
     restart: unless-stopped
     networks:
       - trader-net
-
   training-export:
     build:
       context: .
@@ -980,6 +417,7 @@ services:
     restart: unless-stopped
     networks:
       - trader-net
+    profiles: ["disabled"]
 
   evolution-agent:
     build:
@@ -1007,7 +445,6 @@ services:
     restart: unless-stopped
     networks:
       - trader-net
-
   circuit-breaker:
     build:
       context: .
@@ -1028,6 +465,7 @@ services:
     restart: unless-stopped
     networks:
       - trader-net
+    profiles: ["disabled"]
 
   ab-promoter:
     build:
@@ -1042,6 +480,7 @@ services:
     restart: unless-stopped
     networks:
       - trader-net
+    profiles: ["disabled"]
 
   regime-detector:
     build:
@@ -1056,6 +495,7 @@ services:
     restart: unless-stopped
     networks:
       - trader-net
+    profiles: ["disabled"]
 
   watchdog:
     build:
@@ -1092,86 +532,10 @@ services:
     networks:
       - trader-net
 
-  freqtrade-meanrev:
-    image: freqtradeorg/freqtrade:stable
-    ports:
-      - "8081:8080"
-    volumes:
-      - ./services/freqtrade:/freqtrade/user_data
-      - freqtrade_data_meanrev:/freqtrade/user_data/data
-    command: >
-      trade --dry-run
-      --strategy MeanReversion
-      --config /freqtrade/user_data/config.json
-      --db-url sqlite:////freqtrade/user_data/trades_meanrev.sqlite
-    depends_on:
-      - redis
-    restart: unless-stopped
-    networks:
-      - trader-net
-    profiles: ["disabled"]
-
-  freqtrade-lowfreq:
-    image: freqtradeorg/freqtrade:stable
-    ports:
-      - "8082:8080"
-    volumes:
-      - ./services/freqtrade:/freqtrade/user_data
-      - freqtrade_data_lowfreq:/freqtrade/user_data/data
-    command: >
-      trade --dry-run
-      --strategy LowFrequency
-      --config /freqtrade/user_data/config.json
-      --db-url sqlite:////freqtrade/user_data/trades_lowfreq.sqlite
-    depends_on:
-      - redis
-    restart: unless-stopped
-    networks:
-      - trader-net
-    profiles: ["disabled"]
-
-  freqtrade-swing:
-    image: freqtradeorg/freqtrade:stable
-    ports:
-      - "8083:8080"
-    volumes:
-      - ./services/freqtrade:/freqtrade/user_data
-      - freqtrade_data_swing:/freqtrade/user_data/data
-    command: >
-      trade --dry-run
-      --strategy SwingStrategy
-      --config /freqtrade/user_data/config-swing.json
-      --db-url sqlite:////freqtrade/user_data/trades_swing.sqlite
-    depends_on:
-      - redis
-    restart: unless-stopped
-    networks:
-      - trader-net
-    profiles: ["disabled"]
-
-  freqtrade-bridge:
-    build:
-      context: ./services/freqtrade-bridge
-    environment:
-      REDIS_HOST: redis
-      REDIS_PORT: 6379
-      FREQTRADE_MEANREV_URL: http://freqtrade-meanrev:8080
-      FREQTRADE_LOWFREQ_URL: http://freqtrade-lowfreq:8080
-      FREQTRADE_SWING_URL: http://freqtrade-swing:8080
-      POLL_INTERVAL: "30"
-    depends_on:
-      - redis
-      - freqtrade-meanrev
-      - freqtrade-lowfreq
-      - freqtrade-swing
-    restart: unless-stopped
-    networks:
-      - trader-net
-    profiles: ["disabled"]
-
   nautilus-bridge:
     build:
-      context: ./services/nautilus-bridge
+      context: .
+      dockerfile: services/nautilus-bridge/Dockerfile
     environment:
       REDIS_HOST: redis
       REDIS_PORT: 6379
@@ -1191,7 +555,8 @@ services:
 
   swarm-coordinator:
     build:
-      context: ./services/swarm-coordinator
+      context: .
+      dockerfile: services/swarm-coordinator/Dockerfile
     environment:
       REDIS_HOST: redis
       REDIS_PORT: 6379
@@ -1214,9 +579,6 @@ volumes:
   evolution_data:
   grafana_data:
   monitoring_logs:
-  freqtrade_data_meanrev:
-  freqtrade_data_lowfreq:
-  freqtrade_data_swing:
 
 networks:
   trader-net:

@@ -205,6 +205,7 @@ class StopLossTracker:
         check_counter = 0
         while self.running:
             try:
+                await self.redis.heartbeat("stop-loss-tracker")
                 trades = await self.redis.read_stream(
                     settings.STREAM_TRADE_RESULTS, trade_group, trade_consumer, count=10, block=2000,
                 )

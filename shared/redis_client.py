@@ -1,6 +1,7 @@
 import redis.asyncio as aioredis
 import json
 import logging
+from datetime import datetime, timezone
 from typing import AsyncGenerator
 from shared.config import settings
 
@@ -82,3 +83,8 @@ class RedisClient:
 
     async def set_json(self, key: str, value: dict, ex: int | None = None):
         await self.set(key, json.dumps(value), ex=ex)
+
+    async def heartbeat(self, service_name: str):
+        await self.set_json(f"service:heartbeat:{service_name}", {
+            "last_seen": datetime.now(timezone.utc).isoformat(),
+        })
