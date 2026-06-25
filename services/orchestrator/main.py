@@ -240,6 +240,7 @@ class Orchestrator:
         try:
             signal = TradingSignal(**data)
             self.signal_cache[signal.signal_id] = signal
+            await self.redis.set_json(f"signal:{signal.signal_id}", signal.model_dump(mode="json"), ex=3600)
             if len(self.signal_cache) > 500:
                 keys = list(self.signal_cache.keys())
                 for k in keys[:250]:
