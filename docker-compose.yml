@@ -216,6 +216,7 @@ services:
       PT_INSTANCE: main
       PT_STATE_KEY: paper_trading:state
       PT_STATS_KEY: portfolio:stats
+      PT_VENUE: bybit_testnet
       BYBIT_API_2_KEY: ${BYBIT_API_KEY}
       BYBIT_API_2_SECRET: ${BYBIT_API_SECRET}
     depends_on:

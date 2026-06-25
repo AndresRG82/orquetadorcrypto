@@ -63,7 +63,8 @@ CREATE TABLE IF NOT EXISTS trades (
     confidence DOUBLE PRECISION,
     reasoning TEXT,
     stop_loss DOUBLE PRECISION,
-    take_profit DOUBLE PRECISION
+    take_profit DOUBLE PRECISION,
+    venue VARCHAR(32) DEFAULT 'paper'
 );
 SELECT create_hypertable('trades', 'time', if_not_exists => TRUE);
 

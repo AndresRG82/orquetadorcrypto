@@ -103,7 +103,7 @@ async def root():
     <h2>Posiciones Abiertas</h2>
     <table id="positions"><thead><tr><th>Symbol</th><th>Lado</th><th>Cantidad</th><th>Entrada</th><th>PnL</th><th>Estrategia</th></tr></thead><tbody></tbody></table>
     <h2>Ultimas Operaciones</h2>
-    <table id="trades"><thead><tr><th>Time</th><th>Symbol</th><th>Lado</th><th>PnL</th><th>Estrategia</th><th>Estado</th></tr></thead><tbody></tbody></table>
+    <table id="trades"><thead><tr><th>Time</th><th>Symbol</th><th>Lado</th><th>PnL</th><th>Estrategia</th><th>Estado</th><th>Venue</th></tr></thead><tbody></tbody></table>
     <h2>Senales Recientes</h2>
     <table id="signals"><thead><tr><th>Time</th><th>Symbol</th><th>Senal</th><th>Confianza</th><th>Estrategia</th></tr></thead><tbody></tbody></table>
     <h2>Metricas por Estrategia</h2>
@@ -123,13 +123,14 @@ async def root():
     <script>
     async function loadData() {
         try {
-            const [statsRes, tradesRes, signalsRes, metricsRes, sentimentRes, backtestRes, evolutionRes, attributionRes, nautilusRes, swarmRes, servicesRes] = await Promise.all([
-                fetch('/api/stats'), fetch('/api/trades?limit=20'), fetch('/api/signals?limit=20'), fetch('/api/metrics'),
+            const [statsRes, portfoliosRes, tradesRes, signalsRes, metricsRes, sentimentRes, backtestRes, evolutionRes, attributionRes, nautilusRes, swarmRes, servicesRes] = await Promise.all([
+                fetch('/api/stats'), fetch('/api/portfolios'), fetch('/api/trades?limit=20'), fetch('/api/signals?limit=20'), fetch('/api/metrics'),
                 fetch('/api/sentiment'), fetch('/api/backtest'), fetch('/api/evolution'),
                 fetch('/api/backtest/attribution'), fetch('/api/nautilus'), fetch('/api/swarm'),
                 fetch('/api/services')
             ]);
             const stats = await statsRes.json();
+            const portfolios = await portfoliosRes.json();
             const trades = await tradesRes.json();
             const signals = await signalsRes.json();
             const metrics = await metricsRes.json();
@@ -148,19 +149,23 @@ async def root():
                 });
             }
 
-            const statsCards = [
-                { label: 'Valor Total', value: `$${(stats.total_value||0).toFixed(2)}`, cls: '',
-                  detail: `Cap: $${(stats.initial_capital||0).toFixed(0)}` },
-                { label: 'Cash', value: `$${(stats.cash||0).toFixed(2)}`, cls: '' },
-                { label: 'PnL Total', value: `$${(stats.total_pnl||0).toFixed(2)}`, cls: (stats.total_pnl||0)>=0?'positive':'negative',
-                  detail: `${(stats.total_pnl_pct||0).toFixed(1)}%` },
-                { label: 'Posiciones', value: stats.open_positions||0, cls: '' },
-                { label: 'Trades', value: stats.total_trades||0, cls: '' },
-                { label: 'Win Rate', value: `${(stats.win_rate||0).toFixed(1)}%`, cls: '' },
-            ];
-            document.getElementById('stats').innerHTML = statsCards.map(c =>
-                `<div class="card"><div class="label">${c.label}</div><div class="value ${c.cls}">${c.value}</div>${c.detail ? `<div style="font-size:0.75rem;color:#666">${c.detail}</div>` : ''}</div>`
-            ).join('');
+            const portfolioCards = [];
+            if (portfolios) {
+                Object.entries(portfolios).forEach(([key, p]) => {
+                    portfolioCards.push(
+                        `<div style="grid-column:1/-1;margin-top:5px;color:#00d4aa;font-size:0.9rem;font-weight:600">${p.label}</div>`,
+                        { label: 'Valor', value: `$${(p.value||0).toFixed(2)}`, cls: '' },
+                        { label: 'PnL', value: `$${(p.pnl||0).toFixed(2)}`, cls: (p.pnl||0)>=0?'positive':'negative', detail: `${(p.pnl_pct||0).toFixed(1)}%` },
+                        { label: 'Trades', value: p.trades||0, cls: '' },
+                        { label: 'Win Rate', value: `${(p.win_rate||0).toFixed(1)}%`, cls: '' },
+                        { label: 'Posiciones', value: p.positions||0, cls: '' },
+                    );
+                });
+            }
+            document.getElementById('stats').innerHTML = portfolioCards.filter(c => typeof c === 'string' ? true : false)
+                .concat(portfolioCards.filter(c => typeof c !== 'string').map(c =>
+                    `<div class="card"><div class="label">${c.label}</div><div class="value ${c.cls}">${c.value}</div>${c.detail ? `<div style="font-size:0.75rem;color:#666">${c.detail}</div>` : ''}</div>`
+                )).join('');
 
             const posHtml = stats.positions ? Object.values(stats.positions).map(p =>
                 `<tr><td>${p.symbol}</td><td class="${p.side}">${p.side}</td><td>${(p.quantity||0).toFixed(4)}</td><td>$${(p.entry_price||0).toFixed(4)}</td><td>-</td><td>${p.strategy||'-'}</td></tr>`
@@ -168,8 +173,8 @@ async def root():
             document.querySelector('#positions tbody').innerHTML = posHtml || '<tr><td colspan="6" style="text-align:center;color:#888">Sin posiciones abiertas</td></tr>';
 
             document.querySelector('#trades tbody').innerHTML = (trades||[]).length > 0
-                ? trades.map(t => `<tr><td>${new Date(t.time).toLocaleTimeString()}</td><td>${t.symbol}</td><td class="${t.side}">${t.side}</td><td class="${(t.pnl_usd||0)>=0?'positive':'negative'}">${t.pnl_usd ? '$'+t.pnl_usd.toFixed(2) : '-'}</td><td>${t.strategy||'-'}</td><td>${t.status||'-'}</td></tr>`).join('')
-                : '<tr><td colspan="6" style="text-align:center;color:#888">Sin operaciones</td></tr>';
+                ? trades.map(t => `<tr><td>${new Date(t.time).toLocaleTimeString()}</td><td>${t.symbol}</td><td class="${t.side}">${t.side}</td><td class="${(t.pnl_usd||0)>=0?'positive':'negative'}">${t.pnl_usd ? '$'+t.pnl_usd.toFixed(2) : '-'}</td><td>${t.strategy||'-'}</td><td>${t.status||'-'}</td><td style="font-size:0.7rem;color:#888">${t.venue||'-'}</td></tr>`).join('')
+                : '<tr><td colspan="7" style="text-align:center;color:#888">Sin operaciones</td></tr>';
 
             document.querySelector('#signals tbody').innerHTML = (signals||[]).length > 0
                 ? signals.map(s => `<tr><td>${new Date(s.time).toLocaleTimeString()}</td><td>${s.symbol}</td><td class="${s.signal}">${s.signal}</td><td>${(s.confidence||0).toFixed(2)}</td><td>${s.strategy||'-'}</td></tr>`).join('')
@@ -292,21 +297,22 @@ async def get_stats():
 
 
 INSTANCES = {
-    "main": {"state": "paper_trading:state", "stats": "portfolio:stats", "label": "Main"},
+    "main": {"type": "redis", "state": "paper_trading:state", "stats": "portfolio:stats", "label": "Paper Trading"},
+}
+
+VENUE_INSTANCES = {
+    "bybit_testnet": {"label": "Bybit Testnet"},
+    # future: "binance_paper": {"label": "Binance Paper"},
+    # future: "bybit_live": {"label": "Bybit Live"},
 }
 
 
 @app.get("/api/portfolios")
 async def get_portfolios():
     try:
-        trade_stats = await db.fetch(
-            "SELECT COUNT(*) as total, COUNT(*) FILTER (WHERE pnl_usd > 0) as wins, COUNT(*) FILTER (WHERE pnl_usd < 0) as losses FROM trades WHERE status = 'closed'"
-        )
-        db_trades = trade_stats[0]["total"] if trade_stats else 0
-        db_wins = trade_stats[0]["wins"] if trade_stats else 0
-        db_win_rate = round(db_wins / db_trades * 100, 1) if db_trades > 0 else 0
-
         result = {}
+
+        # --- Redis-backed instances (paper trading engine) ---
         for name, cfg in INSTANCES.items():
             stats = await redis.get_json(cfg["stats"])
             if not stats:
@@ -315,6 +321,13 @@ async def get_portfolios():
                     "total_pnl": 0, "total_pnl_pct": 0, "open_positions": 0,
                     "total_trades": 0, "win_rate": 0, "total_fees": 0,
                 }
+            trade_stats = await db.fetch(
+                "SELECT COUNT(*) as total, COUNT(*) FILTER (WHERE pnl_usd > 0) as wins FROM trades WHERE status = 'closed' AND venue = 'paper'"
+            )
+            db_trades = trade_stats[0]["total"] if trade_stats and trade_stats[0]["total"] else 0
+            db_wins = trade_stats[0]["wins"] if trade_stats else 0
+            db_win_rate = round(db_wins / db_trades * 100, 1) if db_trades > 0 else 0
+
             result[name] = {
                 "label": cfg["label"],
                 "value": round(stats.get("total_value", 1000), 2),
@@ -326,16 +339,55 @@ async def get_portfolios():
                 "positions": stats.get("open_positions", 0),
                 "fees": round(stats.get("total_fees", 0), 2),
             }
+
+        # --- DB-backed instances (exchange venues) ---
+        for venue, vcfg in VENUE_INSTANCES.items():
+            vt = await db.fetch(
+                "SELECT COUNT(*) as total, COUNT(*) FILTER (WHERE pnl_usd > 0) as wins, "
+                "COALESCE(SUM(pnl_usd), 0) as total_pnl, COALESCE(SUM(fee_usd), 0) as total_fees "
+                "FROM trades WHERE status = 'closed' AND venue = $1", venue
+            )
+            if vt:
+                v = vt[0]
+                v_total = v["total"] if v["total"] else 0
+                v_wins = v["wins"] if v["wins"] else 0
+                v_pnl = float(v["total_pnl"]) if v["total_pnl"] else 0
+                v_fees = float(v["total_fees"]) if v["total_fees"] else 0
+            else:
+                v_total = v_wins = 0
+                v_pnl = v_fees = 0.0
+
+            # Initial capital for this venue (stored by engine on startup)
+            v_capital_key = f"portfolio:initial_capital:{venue}"
+            v_capital = await redis.get_json(v_capital_key)
+            initial = float(v_capital) if v_capital else 1000.0
+
+            result[venue] = {
+                "label": vcfg["label"],
+                "value": round(initial + v_pnl, 2),
+                "cash": 0,
+                "pnl": round(v_pnl, 2),
+                "pnl_pct": round(v_pnl / initial * 100, 2) if initial > 0 else 0,
+                "trades": v_total,
+                "win_rate": round(v_wins / v_total * 100, 1) if v_total > 0 else 0,
+                "positions": 0,
+                "fees": round(v_fees, 2),
+            }
+
         return result
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.get("/api/trades")
-async def get_trades(limit: int = Query(default=20, le=100)):
+async def get_trades(limit: int = Query(default=20, le=100), venue: str = Query(default="")):
     try:
-        rows = await db.fetch(
-            "SELECT time, symbol, side, entry_price, exit_price, quantity, quantity_usd, fee_usd, pnl_usd, status, strategy, confidence FROM trades ORDER BY time DESC LIMIT $1", limit)
+        if venue:
+            rows = await db.fetch(
+                "SELECT time, symbol, side, entry_price, exit_price, quantity, quantity_usd, fee_usd, pnl_usd, status, strategy, confidence, venue FROM trades WHERE venue = $1 ORDER BY time DESC LIMIT $2", venue, limit)
+        else:
+            rows = await db.fetch(
+                "SELECT time, symbol, side, entry_price, exit_price, quantity, quantity_usd, fee_usd, pnl_usd, status, strategy, confidence, venue FROM trades ORDER BY time DESC LIMIT $1", limit)
         return [dict(r) for r in rows]
     except Exception:
         return []

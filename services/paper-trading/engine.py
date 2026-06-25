@@ -21,6 +21,7 @@ logger = logging.getLogger("paper-trading")
 INSTANCE_ID = os.getenv("PT_INSTANCE", "main")
 STATE_KEY = os.getenv("PT_STATE_KEY", "paper_trading:state")
 STATS_KEY = os.getenv("PT_STATS_KEY", "portfolio:stats")
+VENUE = os.getenv("PT_VENUE", "paper")  # "paper", "bybit_testnet", "binance_paper", etc.
 STRATEGY_FILTER = os.getenv("PT_STRATEGY_FILTER", "")  # comma-separated or empty=all
 MIN_CONFIDENCE = float(os.getenv("PT_MIN_CONFIDENCE", "0"))
 MAX_POSITION_PCT = float(os.getenv("PT_MAX_POSITION_PCT", "0.20"))
@@ -175,6 +176,7 @@ class PaperTradingEngine:
             f"strategy_filter={STRATEGY_FILTER or 'all'}, min_conf={MIN_CONFIDENCE}, "
             f"max_pos={MAX_POSITION_PCT*100:.0f}%"
         )
+        await self.redis.set_json(f"portfolio:initial_capital:{VENUE}", testnet_balance if self.use_testnet else effective_capital)
 
     async def load_state(self):
         try:
@@ -216,6 +218,7 @@ class PaperTradingEngine:
             )
             is_close = is_close_strategy or (str(order.side).lower().endswith("sell") and has_matching_buy)
 
+            venue_used = VENUE
             if is_close:
                 matching_positions = [
                     oid for oid, pos in self.portfolio.positions.items()
@@ -230,11 +233,15 @@ class PaperTradingEngine:
                         testnet = await self._place_testnet_order(order.symbol, "sell", pos["quantity"])
                         if testnet:
                             order.entry_price = testnet["price"]
+                            venue_used = VENUE
+                        else:
+                            venue_used = "paper"
                     result = self.portfolio.close_position(
                         oid, order.entry_price, reason=order.reasoning,
                     )
                     if result:
                         result["signal_id"] = order.signal_id
+                        result["venue"] = venue_used
                         await self.publish_result(result)
                         await self.store_trade(result)
             else:
@@ -244,6 +251,9 @@ class PaperTradingEngine:
                         order.entry_price = testnet["price"]
                         order.quantity = testnet["quantity"]
                         order.quantity_usd = testnet["price"] * testnet["quantity"]
+                        venue_used = VENUE
+                    else:
+                        venue_used = "paper"
                 result = self.portfolio.open_position(
                     order_id=order.order_id,
                     symbol=order.symbol,
@@ -259,6 +269,7 @@ class PaperTradingEngine:
                 )
                 if result:
                     result["signal_id"] = order.signal_id
+                    result["venue"] = venue_used
                     await self.publish_result(result)
                     await self.store_trade(result)
                     self.trades_today += 1
@@ -266,12 +277,14 @@ class PaperTradingEngine:
             await self.save_state()
             stats = self.portfolio.get_stats(self.current_prices)
             await self.redis.set_json(STATS_KEY, stats)
+            await self.redis.set_json(f"portfolio:stats:{venue_used}", stats)
             await self._update_strategy_signals(result)
             await self._update_strategy_metrics(result)
             logger.info(
                 f"[{INSTANCE_ID}] value=${stats['total_value']:.2f} "
                 f"PnL=${stats['total_pnl']:.2f} ({stats['total_pnl_pct']:.1f}%) "
-                f"trades={stats['total_trades']} wr={stats['win_rate']:.0f}%"
+                f"trades={stats['total_trades']} wr={stats['win_rate']:.0f}% "
+                f"venue={venue_used}"
             )
 
         except Exception as e:
@@ -305,14 +318,15 @@ class PaperTradingEngine:
             await self.db.execute(
                 """INSERT INTO trades (time, order_id, symbol, side, entry_price, exit_price,
                    quantity, quantity_usd, fee_usd, pnl_usd, status, strategy, confidence, reasoning,
-                   stop_loss, take_profit)
-                   VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)""",
+                   stop_loss, take_profit, venue)
+                   VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)""",
                 datetime.now(timezone.utc), result["order_id"], result["symbol"],
                 result["side"], result["entry_price"], result.get("exit_price", result["entry_price"]),
                 result["quantity"], result["quantity_usd"], result["fee_usd"],
                 result["pnl_usd"], result["status"], result.get("strategy", ""),
                 result.get("confidence", 0), result.get("reasoning", ""),
                 result.get("stop_loss"), result.get("take_profit"),
+                result.get("venue", "paper"),
             )
         except Exception as e:
             logger.error(f"[{INSTANCE_ID}] Error storing trade: {e}")
