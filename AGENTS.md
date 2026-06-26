@@ -9,15 +9,15 @@ python -m py_compile <file>
 
 ## Architecture
 
-40+ Docker microservices communicating via Redis streams. Runs in **mock mode** (`MOCK_MODE=true` in `.env`) — no real exchange. Synthetic OHLCV via `services/market-scanner/mock_scanner.py`.
+40+ Docker microservices communicating via Redis streams. Runs in **mock mode** (`MOCK_MODE=true`) or **real mode** with OKX testnet (`MOCK_MODE=false`, `EXCHANGE=okx`, OKX API keys in `.env`). Synthetic OHLCV via `services/market-scanner/mock_scanner.py`; real OHLCV via `services/market-scanner-okx/scanner.py`
 
-**Data flow:** market-scanner → Redis streams (`market:data`, `market:indicators`) → strategy agents → `strategy:signals` → risk-manager → `risk:approved` → paper-trading → `trade:results`
+**Data flow:** market-scanner (mock, optional OKX real) → Redis streams (`market:data`, `market:indicators`) → strategy agents → `strategy:signals` → risk-manager → `risk:approved` → paper-trading → `trade:results`
 
 **Core infra:** Redis (streams + key-value), TimescaleDB (hypertables), Ollama (gemma3:4b primary, qwen2.5:3b fallback).
 
 ## Docker profiles
 
-- **Active by default:** redis, timescaledb, market-scanner, qwen-analyzer, strategy-{scalping,swing,arbitrage}, risk-manager, paper-trading, dashboard, backtesting, evolution-agent, monitoring
+- **Active by default:** redis, timescaledb, market-scanner, market-scanner-okx, qwen-analyzer, strategy-{scalping,swing,arbitrage}, risk-manager, paper-trading, paper-trading-okx, paper-trading-okx-swap, dashboard, circuit-breaker, regime-detector, sentiment, backtesting, evolution-agent, monitoring, stop-loss, stop-loss-tracker, orchestrator
 - **Disabled** (`profiles: ["disabled"]`): 10 paper-trading A/B variants (`pt-*`), 3 freqtrade containers, freqtrade-bridge
 - **Opt-in:** `--profile nautilus` (nautilus-bridge), `--profile swarm` (swarm-coordinator)
 
@@ -34,7 +34,7 @@ Root-context services set `WORKDIR /app`, copy `shared/` to `/app/shared/`, serv
 pip install --break-system-packages python-dotenv pydantic pandas numpy redis asyncpg scipy
 ```
 
-Key modules: `config.py` (Settings with env vars + Redis stream names), `models.py` (TechnicalIndicators, TradingSignal, OHLCVData), `redis_client.py` (singleton, stream publish/read, get_json/set_json), `db.py` (asyncpg pool singleton).
+Key modules: `config.py` (Settings with env vars + Redis stream names), `models.py` (TechnicalIndicators, TradingSignal, OHLCVData), `redis_client.py` (singleton, stream publish/read, get_json/set_json), `db.py` (asyncpg pool singleton), `indicators.py` (compute_indicators shared by market-scanner and market-scanner-okx).
 
 ## Alpha Zoo
 

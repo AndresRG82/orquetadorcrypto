@@ -32,6 +32,8 @@ MAX_TRADES_PER_DAY = int(os.getenv("PT_MAX_TRADES_PER_DAY", "0"))  # 0=unlimited
 SENTIMENT_GATED = os.getenv("PT_SENTIMENT_GATED", "")  # "fear" or "greed" or empty=off
 SENTIMENT_THRESHOLD = int(os.getenv("PT_SENTIMENT_THRESHOLD", "25"))  # fear below, greed above
 TIME_FILTER = os.getenv("PT_TIME_FILTER", "")  # e.g. "5,6,8,17,22" (UTC hours) or empty=all
+SWAP_ENABLED = os.getenv("PT_SWAP_ENABLED", "").lower() == "true"
+LEVERAGE = float(os.getenv("PT_LEVERAGE", "1"))
 
 
 class PaperTradingEngine:
@@ -105,16 +107,19 @@ class PaperTradingEngine:
             logger.info(f"[{INSTANCE_ID}] No paper API key, using in-memory simulation")
             return
         try:
-            exchange_cls = getattr(ccxt, settings.PAPER_EXCHANGE)
-            self.exchange = exchange_cls({
+            exchange_opts = {
                 "apiKey": settings.PAPER_API_KEY,
                 "secret": settings.PAPER_API_SECRET,
                 "enableRateLimit": True,
-                "options": {
-                    "defaultType": "spot",
-                    "enableUnifiedAccount": True,
-                },
-            })
+                "options": {"defaultType": "swap" if SWAP_ENABLED else "spot"},
+            }
+            pw = os.getenv(f"{settings.PAPER_EXCHANGE.upper()}_API_PASSWORD", "")
+            if pw:
+                exchange_opts["password"] = pw
+            if settings.PAPER_EXCHANGE == "bybit":
+                exchange_opts["options"]["enableUnifiedAccount"] = True
+            exchange_cls = getattr(ccxt, settings.PAPER_EXCHANGE)
+            self.exchange = exchange_cls(exchange_opts)
             if settings.PAPER_TESTNET:
                 try:
                     self.exchange.set_sandbox_mode(True)
@@ -124,14 +129,39 @@ class PaperTradingEngine:
                         "linear": "https://api-testnet.bybit.com",
                         "inverse": "https://api-testnet.bybit.com",
                     }
-            await self.exchange.load_markets()
+            try:
+                await self.exchange.load_markets()
+            except Exception as lm_e:
+                logger.warning(f"[{INSTANCE_ID}] Markets load failed ({lm_e}), continuing without market metadata")
             logger.info(f"[{INSTANCE_ID}] Connected to {settings.PAPER_EXCHANGE} testnet")
             self.use_testnet = True
+            if SWAP_ENABLED:
+                await self._init_leverage()
         except Exception as e:
             logger.warning(f"[{INSTANCE_ID}] Testnet connection failed: {e}, using in-memory simulation")
             if self.exchange:
                 await self.exchange.close()
             self.exchange = None
+
+    async def _init_leverage(self):
+        if not self.exchange:
+            return
+        try:
+            for sym in settings.TOP_PAIRS:
+                swap_sym = self._swap_symbol(sym)
+                if swap_sym != sym:
+                    await self.exchange.set_leverage(LEVERAGE, swap_sym)
+                    logger.info(f"[{INSTANCE_ID}] Set {LEVERAGE}x leverage on {swap_sym}")
+        except Exception as e:
+            logger.warning(f"[{INSTANCE_ID}] Leverage init warning: {e}")
+
+    def _swap_symbol(self, symbol: str) -> str:
+        if not SWAP_ENABLED or not self.exchange:
+            return symbol
+        swap_sym = f"{symbol}:USDT"
+        if swap_sym in getattr(self.exchange, 'markets', {}):
+            return swap_sym
+        return symbol
 
     async def _fetch_testnet_balance(self) -> float:
         if not self.exchange:
@@ -147,15 +177,44 @@ class PaperTradingEngine:
             logger.warning(f"[{INSTANCE_ID}] Could not fetch testnet balance: {e}")
         return INITIAL_CAPITAL
 
-    async def _place_testnet_order(self, symbol: str, side: str, quantity: float) -> dict | None:
+    async def _place_testnet_order(self, symbol: str, side: str, quantity: float,
+                                    stop_loss: float | None = None, take_profit: float | None = None) -> dict | None:
         if not self.exchange:
             return None
         try:
-            order = await self.exchange.create_order(symbol, "market", side, quantity)
+            trade_symbol = self._swap_symbol(symbol)
+            final_qty = quantity
+            if SWAP_ENABLED and trade_symbol != symbol:
+                try:
+                    market = self.exchange.market(trade_symbol)
+                    contract_size = float(market.get('contractSize', 1))
+                    final_qty = max(1, round(quantity / contract_size))
+                    quantity = final_qty * contract_size
+                except Exception:
+                    pass
+
+            params = {}
+            if take_profit:
+                params["tpTriggerPx"] = take_profit
+                params["tpOrdPx"] = -1
+            if stop_loss:
+                params["slTriggerPx"] = stop_loss
+                params["slOrdPx"] = -1
+            order = await self.exchange.create_order(trade_symbol, "market", side, final_qty, params)
             await asyncio.sleep(1)
-            filled = await self.exchange.fetch_order(order["id"], symbol)
-            avg_price = float(filled.get("average", filled.get("price", 0)))
-            filled_qty = float(filled.get("filled", quantity))
+            try:
+                filled = await self.exchange.fetch_order(order["id"], trade_symbol, params={"acknowledged": True})
+            except Exception:
+                filled = await self.exchange.fetch_order(order["id"], trade_symbol)
+            avg_price = float(filled.get("average", filled.get("price", 0) or 0))
+            filled_qty = float(filled.get("filled", final_qty))
+            if SWAP_ENABLED and trade_symbol != symbol:
+                try:
+                    market = self.exchange.market(trade_symbol)
+                    contract_size = float(market.get('contractSize', 1))
+                    filled_qty = filled_qty * contract_size
+                except Exception:
+                    pass
             if avg_price > 0 and filled_qty > 0:
                 logger.info(f"[{INSTANCE_ID}] Testnet fill: {side} {filled_qty:.6f} {symbol} @ ${avg_price:.4f}")
                 return {"price": avg_price, "quantity": filled_qty, "order_id": filled["id"]}
@@ -170,7 +229,15 @@ class PaperTradingEngine:
         testnet_balance = await self._fetch_testnet_balance()
         effective_capital = INITIAL_CAPITAL if INITIAL_CAPITAL > 0 else testnet_balance
         self.portfolio = Portfolio(effective_capital, settings.BASE_CURRENCY)
-        await self.load_state()
+        if self.use_testnet and self.exchange:
+            logger.info(f"[{INSTANCE_ID}] Connected to testnet, starting fresh (ignoring restored simulation state)")
+            await self.redis.set_json(STATE_KEY, {
+                "cash": effective_capital, "positions": {},
+                "total_fees": 0, "total_slippage": 0,
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+            })
+        else:
+            await self.load_state()
         logger.info(
             f"[{INSTANCE_ID}] Paper Trading initialized: capital=${effective_capital:.2f}, "
             f"strategy_filter={STRATEGY_FILTER or 'all'}, min_conf={MIN_CONFIDENCE}, "
@@ -230,7 +297,8 @@ class PaperTradingEngine:
                 for oid in matching_positions:
                     pos = self.portfolio.positions.get(oid)
                     if pos and self.use_testnet:
-                        testnet = await self._place_testnet_order(order.symbol, "sell", pos["quantity"])
+                        close_side = "buy" if pos["side"] == "sell" else "sell"
+                        testnet = await self._place_testnet_order(order.symbol, close_side, pos["quantity"])
                         if testnet:
                             order.entry_price = testnet["price"]
                             venue_used = VENUE
@@ -246,7 +314,11 @@ class PaperTradingEngine:
                         await self.store_trade(result)
             else:
                 if self.use_testnet:
-                    testnet = await self._place_testnet_order(order.symbol, "buy", order.quantity)
+                    exchange_side = order.side.value
+                    testnet = await self._place_testnet_order(
+                        order.symbol, exchange_side, order.quantity,
+                        order.stop_loss, order.take_profit,
+                    )
                     if testnet:
                         order.entry_price = testnet["price"]
                         order.quantity = testnet["quantity"]
@@ -266,6 +338,7 @@ class PaperTradingEngine:
                     strategy=order.strategy,
                     confidence=order.confidence,
                     reasoning=order.reasoning,
+                    leverage=LEVERAGE,
                 )
                 if result:
                     result["signal_id"] = order.signal_id

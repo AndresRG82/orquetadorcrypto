@@ -56,6 +56,27 @@ services:
     networks:
       - trader-net
 
+  market-scanner-okx:
+    build:
+      context: .
+      dockerfile: services/market-scanner-okx/Dockerfile
+    environment:
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      DB_HOST: timescaledb
+      DB_PORT: 5432
+      DB_NAME: ${TIMESCALE_DB:-trader}
+      DB_USER: ${TIMESCALE_USER:-trader}
+      DB_PASSWORD: ${TIMESCALE_PASSWORD:-trader123}
+    depends_on:
+      redis:
+        condition: service_healthy
+      timescaledb:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - trader-net
+
   qwen-analyzer:
     build:
       context: .
@@ -222,9 +243,7 @@ services:
       PT_INSTANCE: main
       PT_STATE_KEY: paper_trading:state
       PT_STATS_KEY: portfolio:stats
-      PT_VENUE: bybit_testnet
-      BYBIT_API_2_KEY: ${BYBIT_API_KEY}
-      BYBIT_API_2_SECRET: ${BYBIT_API_SECRET}
+      PT_VENUE: paper
     depends_on:
       redis:
         condition: service_healthy
@@ -378,7 +397,6 @@ services:
     restart: unless-stopped
     networks:
       - trader-net
-    profiles: ["disabled"]
 
   backtesting:
     build:
@@ -472,7 +490,6 @@ services:
     restart: unless-stopped
     networks:
       - trader-net
-    profiles: ["disabled"]
 
   ab-promoter:
     build:
@@ -502,7 +519,6 @@ services:
     restart: unless-stopped
     networks:
       - trader-net
-    profiles: ["disabled"]
 
   watchdog:
     build:
@@ -535,6 +551,70 @@ services:
         condition: service_healthy
       dashboard:
         condition: service_started
+  paper-trading-okx:
+    build:
+      context: .
+      dockerfile: services/paper-trading/Dockerfile
+    environment:
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      DB_HOST: timescaledb
+      DB_PORT: 5432
+      DB_NAME: ${TIMESCALE_DB:-trader}
+      DB_USER: ${TIMESCALE_USER:-trader}
+      DB_PASSWORD: ${TIMESCALE_PASSWORD:-trader123}
+      SLIPPAGE_PCT: ${SLIPPAGE_PCT:-0.001}
+      TRADING_FEE_PCT: ${TRADING_FEE_PCT:-0.00075}
+      INITIAL_CAPITAL: ${INITIAL_CAPITAL:-1000.0}
+      BASE_CURRENCY: ${BASE_CURRENCY:-USDT}
+      PT_INSTANCE: okx
+      PT_STATE_KEY: paper_trading:state:okx
+      PT_STATS_KEY: portfolio:stats:okx
+      PT_VENUE: okx_testnet
+      PAPER_EXCHANGE: okx
+      OKX_API_2_KEY: ${OKX_API_KEY}
+      OKX_API_2_SECRET: ${OKX_API_SECRET}
+      OKX_API_PASSWORD: ${OKX_API_PASSWORD}
+    depends_on:
+      redis:
+        condition: service_healthy
+      timescaledb:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - trader-net
+
+  paper-trading-okx-swap:
+    build:
+      context: .
+      dockerfile: services/paper-trading/Dockerfile
+    environment:
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      DB_HOST: timescaledb
+      DB_PORT: 5432
+      DB_NAME: ${TIMESCALE_DB:-trader}
+      DB_USER: ${TIMESCALE_USER:-trader}
+      DB_PASSWORD: ${TIMESCALE_PASSWORD:-trader123}
+      SLIPPAGE_PCT: ${SLIPPAGE_PCT:-0.001}
+      TRADING_FEE_PCT: ${TRADING_FEE_PCT:-0.00075}
+      INITIAL_CAPITAL: ${INITIAL_CAPITAL:-1000.0}
+      BASE_CURRENCY: ${BASE_CURRENCY:-USDT}
+      PT_INSTANCE: okx-swap
+      PT_STATE_KEY: paper_trading:state:okx_swap
+      PT_STATS_KEY: portfolio:stats:okx_swap
+      PT_VENUE: okx_swap_testnet
+      PAPER_EXCHANGE: okx
+      PT_SWAP_ENABLED: "true"
+      PT_LEVERAGE: "3"
+      OKX_API_2_KEY: ${OKX_API_KEY}
+      OKX_API_2_SECRET: ${OKX_API_SECRET}
+      OKX_API_PASSWORD: ${OKX_API_PASSWORD}
+    depends_on:
+      redis:
+        condition: service_healthy
+      timescaledb:
+        condition: service_healthy
     restart: unless-stopped
     networks:
       - trader-net

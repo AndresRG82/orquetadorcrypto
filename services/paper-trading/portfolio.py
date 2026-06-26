@@ -29,23 +29,27 @@ class Portfolio:
     def open_position(self, order_id: str, symbol: str, side: str, quantity: float,
                       entry_price: float, quantity_usd: float, stop_loss: float = None,
                       take_profit: float = None, strategy: str = "", confidence: float = 0.0,
-                      reasoning: str = "") -> Optional[dict]:
-        fee = quantity_usd * float(settings.TRADING_FEE_PCT)
-        slippage = quantity_usd * float(settings.SLIPPAGE_PCT)
+                      reasoning: str = "", leverage: float = 1.0) -> Optional[dict]:
+        margin = quantity_usd
+        notional = margin * leverage
+        fee = notional * float(settings.TRADING_FEE_PCT)
+        slippage = notional * float(settings.SLIPPAGE_PCT)
         effective_price = entry_price * (1 + float(settings.SLIPPAGE_PCT)) if side == "buy" else entry_price * (1 - float(settings.SLIPPAGE_PCT))
+        quantity = notional / effective_price
 
-        cost = quantity_usd + fee + slippage
+        cost = margin + fee + slippage
 
         if cost > self.cash:
-            effective_usd = self.cash * 0.95
-            if effective_usd < self.MIN_POSITION_USD:
+            effective_margin = self.cash * 0.95
+            if effective_margin < self.MIN_POSITION_USD:
                 logger.warning(f"Insufficient cash (${self.cash:.2f}) for {symbol}, minimum ${self.MIN_POSITION_USD}")
                 return None
-            quantity = effective_usd / effective_price
-            quantity_usd = effective_usd
-            fee = quantity_usd * float(settings.TRADING_FEE_PCT)
-            slippage = quantity_usd * float(settings.SLIPPAGE_PCT)
-            cost = quantity_usd + fee + slippage
+            margin = effective_margin
+            notional = margin * leverage
+            quantity = notional / effective_price
+            fee = notional * float(settings.TRADING_FEE_PCT)
+            slippage = notional * float(settings.SLIPPAGE_PCT)
+            cost = margin + fee + slippage
 
         self.cash -= cost
         self.total_fees += fee
@@ -57,7 +61,9 @@ class Portfolio:
             "side": side,
             "quantity": quantity,
             "entry_price": effective_price,
-            "quantity_usd": quantity_usd,
+            "quantity_usd": notional,
+            "margin": margin,
+            "leverage": leverage,
             "fee": fee,
             "slippage": slippage,
             "stop_loss": stop_loss,
@@ -77,7 +83,9 @@ class Portfolio:
             "entry_price": effective_price,
             "exit_price": effective_price,
             "quantity": quantity,
-            "quantity_usd": quantity_usd,
+            "quantity_usd": notional,
+            "margin": margin,
+            "leverage": leverage,
             "fee_usd": fee,
             "slippage_usd": slippage,
             "pnl_usd": -(fee + slippage),
@@ -89,9 +97,10 @@ class Portfolio:
             "take_profit": take_profit,
         }
 
+        leverage_str = f" {leverage}x" if leverage > 1 else ""
         logger.info(
             f"OPENED: {side.upper()} {symbol} qty={quantity:.6f} "
-            f"@ ${effective_price:.2f} (${quantity_usd:.2f}) fee=${fee:.4f}"
+            f"@ ${effective_price:.2f} (${margin:.2f} margin{leverage_str}) fee=${fee:.4f}"
         )
         return result
 
@@ -114,8 +123,9 @@ class Portfolio:
             gross_pnl = (pos["entry_price"] - effective_close) * pos["quantity"]
 
         net_pnl = gross_pnl - fee
-
-        proceeds = pos["quantity"] * effective_close
+        leverage = pos.get("leverage", 1.0)
+        margin = pos.get("margin", pos["quantity_usd"])
+        proceeds = margin + gross_pnl
         self.cash += proceeds - fee
 
         del self.positions[order_id]
@@ -128,6 +138,8 @@ class Portfolio:
             "exit_price": effective_close,
             "quantity": pos["quantity"],
             "quantity_usd": pos["quantity_usd"],
+            "margin": margin,
+            "leverage": leverage,
             "fee_usd": fee,
             "slippage_usd": slippage,
             "pnl_usd": net_pnl,

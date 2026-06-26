@@ -1,16 +1,10 @@
 import asyncio
 import logging
 import sys
-import json
 from datetime import datetime, timezone
-from pathlib import Path
 
 import ccxt.async_support as ccxt
-import numpy as np
 import pandas as pd
-from ta.momentum import RSIIndicator
-from ta.trend import MACD, EMAIndicator
-from ta.volatility import BollingerBands, AverageTrueRange
 
 sys.path.insert(0, "/app")
 from shared.config import settings
@@ -23,44 +17,25 @@ logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
 )
-logger = logging.getLogger("market-scanner")
+logger = logging.getLogger("market-scanner-okx")
 
 
-class MarketScanner:
+class OKXMarketScanner:
     def __init__(self):
         self.exchange = None
         self.redis: RedisClient | None = None
         self.db: Database | None = None
         self.running = False
-        self.active_pairs: list[str] = []
 
     async def initialize(self):
         self.redis = await RedisClient.get_instance()
         self.db = await Database.get_instance()
-        exchange_cls = getattr(ccxt, settings.EXCHANGE)
-        exchange_config = {"enableRateLimit": True}
-        if settings.EXCHANGE_API_KEY:
-            exchange_config["apiKey"] = settings.EXCHANGE_API_KEY
-            exchange_config["secret"] = settings.EXCHANGE_API_SECRET
-        self.exchange = exchange_cls(exchange_config)
-        await self.load_active_pairs()
-        logger.info(f"Market Scanner initialized with {len(self.active_pairs)} pairs")
-
-    async def load_active_pairs(self):
-        try:
-            await self.exchange.load_markets()
-            markets = self.exchange.markets
-            self.active_pairs = [p for p in settings.TOP_PAIRS if p in markets]
-            if not self.active_pairs:
-                logger.warning("No configured pairs found, falling back to top USDT pairs by volume")
-                usdt_pairs = [s for s in markets if s.endswith("/USDT") and markets[s].get("active", True)]
-                tickers = await self.exchange.fetch_tickers(usdt_pairs)
-                sorted_pairs = sorted(usdt_pairs, key=lambda p: tickers.get(p, {}).get("quoteVolume", 0), reverse=True)
-                self.active_pairs = sorted_pairs[:20]
-            logger.info(f"Active pairs: {self.active_pairs}")
-        except Exception as e:
-            logger.error(f"Error loading pairs: {e}")
-            self.active_pairs = settings.TOP_PAIRS
+        self.exchange = ccxt.okx({
+            "enableRateLimit": True,
+            "options": {"defaultType": "spot"},
+        })
+        await self.exchange.load_markets()
+        logger.info(f"OKX Market Scanner initialized with {len(self.exchange.markets)} markets")
 
     async def fetch_and_publish(self, pair: str, timeframe: str):
         try:
@@ -143,12 +118,11 @@ class MarketScanner:
 
     async def scan_timeframe(self, timeframe: str):
         interval = settings.SCAN_INTERVALS.get(timeframe, 300)
-        logger.info(f"Starting scan loop for {timeframe} (interval: {interval}s)")
+        logger.info(f"Starting OKX scan loop for {timeframe} (interval: {interval}s)")
         while self.running:
-            tasks = [self.fetch_and_publish(pair, timeframe) for pair in self.active_pairs]
+            tasks = [self.fetch_and_publish(pair, timeframe) for pair in settings.TOP_PAIRS]
             await asyncio.gather(*tasks, return_exceptions=True)
-            await self.redis.heartbeat("market-scanner")
-            logger.debug(f"Completed scan for {timeframe}, {len(self.active_pairs)} pairs")
+            await self.redis.heartbeat("market-scanner-okx")
             await asyncio.sleep(interval)
 
     async def run(self):
@@ -157,7 +131,7 @@ class MarketScanner:
         loops = []
         for tf in settings.TIMEFRAMES:
             loops.append(asyncio.create_task(self.scan_timeframe(tf)))
-        logger.info(f"Scanner running with {len(loops)} timeframe tasks")
+        logger.info(f"OKX Scanner running with {len(loops)} timeframe tasks")
         try:
             await asyncio.gather(*loops)
         except asyncio.CancelledError:
@@ -172,7 +146,7 @@ class MarketScanner:
 
 
 async def main():
-    scanner = MarketScanner()
+    scanner = OKXMarketScanner()
     await scanner.run()
 
 

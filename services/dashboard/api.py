@@ -306,9 +306,8 @@ INSTANCES = {
 }
 
 VENUE_INSTANCES = {
-    "bybit_testnet": {"label": "Bybit Testnet"},
-    # future: "binance_paper": {"label": "Binance Paper"},
-    # future: "bybit_live": {"label": "Bybit Live"},
+    "okx_testnet": {"label": "OKX Testnet", "state": "paper_trading:state:okx"},
+    "okx_swap_testnet": {"label": "OKX Swap 3x", "state": "paper_trading:state:okx_swap"},
 }
 
 
@@ -327,7 +326,7 @@ async def get_portfolios():
                     "total_trades": 0, "win_rate": 0, "total_fees": 0,
                 }
             trade_stats = await db.fetch(
-                "SELECT COUNT(*) as total, COUNT(*) FILTER (WHERE pnl_usd > 0) as wins FROM trades WHERE status = 'closed' AND venue = 'paper'"
+                "SELECT COUNT(*) as total, COUNT(*) FILTER (WHERE pnl_usd > 0) as wins FROM trades WHERE (status = 'closed' OR status = 'open') AND venue = 'paper'"
             )
             db_trades = trade_stats[0]["total"] if trade_stats and trade_stats[0]["total"] else 0
             db_wins = trade_stats[0]["wins"] if trade_stats else 0
@@ -350,7 +349,7 @@ async def get_portfolios():
             vt = await db.fetch(
                 "SELECT COUNT(*) as total, COUNT(*) FILTER (WHERE pnl_usd > 0) as wins, "
                 "COALESCE(SUM(pnl_usd), 0) as total_pnl, COALESCE(SUM(fee_usd), 0) as total_fees "
-                "FROM trades WHERE status = 'closed' AND venue = $1", venue
+                "FROM trades WHERE venue = $1 AND (status = 'closed' OR status = 'open')", venue
             )
             if vt:
                 v = vt[0]
@@ -367,6 +366,14 @@ async def get_portfolios():
             v_capital = await redis.get_json(v_capital_key)
             initial = float(v_capital) if v_capital else 1000.0
 
+            # Live positions from engine state
+            v_positions_raw = {}
+            v_state_key = vcfg.get("state", "")
+            if v_state_key:
+                v_state = await redis.get_json(v_state_key)
+                if v_state:
+                    v_positions_raw = v_state.get("positions", {})
+
             result[venue] = {
                 "label": vcfg["label"],
                 "value": round(initial + v_pnl, 2),
@@ -375,7 +382,8 @@ async def get_portfolios():
                 "pnl_pct": round(v_pnl / initial * 100, 2) if initial > 0 else 0,
                 "trades": v_total,
                 "win_rate": round(v_wins / v_total * 100, 1) if v_total > 0 else 0,
-                "positions": 0,
+                "positions": len(v_positions_raw),
+                "positions_raw": v_positions_raw,
                 "fees": round(v_fees, 2),
             }
 
