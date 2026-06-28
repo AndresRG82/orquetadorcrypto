@@ -18,7 +18,22 @@ from shared.db import Database
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(name)s] %(levelname)s: %(message)s")
 logger = logging.getLogger("risk-manager")
 
-MAX_CONCURRENT_POSITIONS = 10
+MAX_POSITIONS_PAPER = int(os.getenv("MAX_POSITIONS_PAPER", "10"))
+MAX_POSITIONS_OKX_SPOT = int(os.getenv("MAX_POSITIONS_OKX_SPOT", "6"))
+MAX_POSITIONS_OKX_SWAP = int(os.getenv("MAX_POSITIONS_OKX_SWAP", "4"))
+MAX_CONCURRENT_POSITIONS = MAX_POSITIONS_PAPER + MAX_POSITIONS_OKX_SPOT + MAX_POSITIONS_OKX_SWAP
+
+VENUE_STATE_KEYS: dict[str, str] = {
+    "paper": "paper_trading:state",
+    "okx_testnet": "paper_trading:state:okx",
+    "okx_swap_testnet": "paper_trading:state:okx_swap",
+}
+VENUE_MAX_POSITIONS: dict[str, int] = {
+    "paper": MAX_POSITIONS_PAPER,
+    "okx_testnet": MAX_POSITIONS_OKX_SPOT,
+    "okx_swap_testnet": MAX_POSITIONS_OKX_SWAP,
+}
+
 SIGNAL_COOLDOWNS: dict[str, dict] = {
     "scalping": {"seconds": 900, "label": "15min"},
     "swing": {"seconds": 3600, "label": "1h"},
@@ -51,6 +66,9 @@ class RiskManager:
         self.peak_value: float = self.INITIAL_CAPITAL
         self.cash_available: float = self.INITIAL_CAPITAL
         self.open_positions: dict[str, dict] = {}
+        self.open_positions_by_venue: dict[str, dict[str, dict]] = {
+            "paper": {}, "okx_testnet": {}, "okx_swap_testnet": {},
+        }
         self.consecutive_losses: int = 0
         self.loss_cooldown_until: float = 0.0
         self.total_trades: int = 0
@@ -58,16 +76,25 @@ class RiskManager:
         self.signal_cooldowns: dict[str, datetime] = {}
         self.evo_params: dict = {}
         self.auto_tuner = RiskAutoTuner(self)
+        self._startup_recovered = False
 
     async def initialize(self):
         self.redis = await RedisClient.get_instance()
         self.db = await Database.get_instance()
         await self.load_evo_params()
         await self.load_portfolio_state()
+        limits = ", ".join(f"{v}={MAX_POSITIONS_PAPER}" for v in ["paper"]) if False else \
+            f"paper={MAX_POSITIONS_PAPER} okx_spot={MAX_POSITIONS_OKX_SPOT} okx_swap={MAX_POSITIONS_OKX_SWAP}"
+        per_venue_counts = ", ".join(
+            f"{v}={len(self.open_positions_by_venue[v])}"
+            for v in ["paper", "okx_testnet", "okx_swap_testnet"]
+        )
         logger.info(
             f"Risk Manager initialized: max_position={self.MAX_POSITION_PCT*100:.0f}%, "
             f"max_drawdown={self.MAX_DRAWDOWN_PCT*100:.0f}%, capital=${self.INITIAL_CAPITAL}, "
-            f"max_positions={MAX_CONCURRENT_POSITIONS}"
+            f"limits: paper={MAX_POSITIONS_PAPER} okx_spot={MAX_POSITIONS_OKX_SPOT} okx_swap={MAX_POSITIONS_OKX_SWAP}, "
+            f"total_max={MAX_CONCURRENT_POSITIONS}, "
+            f"open_per_venue: {per_venue_counts}, combined={len(self.open_positions)}"
         )
 
     async def load_evo_params(self):
@@ -97,41 +124,53 @@ class RiskManager:
                     self.peak_value = self.portfolio_value
                 else:
                     self.peak_value = loaded_peak
-                self.open_positions = own_state.get("positions", {})
                 self.consecutive_losses = int(own_state.get("consecutive_losses", 0))
                 self.loss_cooldown_until = float(own_state.get("loss_cooldown_until", 0))
                 self.total_trades = int(own_state.get("total_trades", 0))
                 self.winning_trades = int(own_state.get("winning_trades", 0))
-                logger.info(f"Loaded own state: value=${self.portfolio_value:.2f}, positions={len(self.open_positions)}")
+                logger.info(f"Loaded own state: value=${self.portfolio_value:.2f}, trades={self.total_trades}, consecutive_losses={self.consecutive_losses}")
 
-            pt_state = await self.redis.get_json("paper_trading:state")
-            if pt_state:
-                pt_cash = float(pt_state.get("cash", self.INITIAL_CAPITAL))
-                pt_positions = pt_state.get("positions", {})
-                total_position_value = sum(
-                    float(p.get("quantity", 0)) * float(p.get("entry_price", 0))
-                    for p in pt_positions.values() if isinstance(p, dict)
+            positions_from_any = False
+            for venue_name, state_key in VENUE_STATE_KEYS.items():
+                try:
+                    vstate = await self.redis.get_json(state_key)
+                    if vstate and vstate.get("positions"):
+                        count = 0
+                        for oid, pdata in vstate["positions"].items():
+                            if isinstance(pdata, dict):
+                                self.open_positions_by_venue[venue_name][oid] = {
+                                    "symbol": pdata.get("symbol", ""),
+                                    "side": pdata.get("side", ""),
+                                    "quantity_usd": float(pdata.get("quantity_usd", 0)),
+                                    "venue": venue_name,
+                                }
+                                count += 1
+                        if count > 0:
+                            positions_from_any = True
+                            logger.info(f"Loaded {count} positions from {state_key} (venue={venue_name})")
+
+                        if venue_name == "paper" and vstate.get("cash"):
+                            self.cash_available = float(vstate["cash"])
+                except Exception as ve:
+                    logger.debug(f"Could not load from {state_key}: {ve}")
+                await asyncio.sleep(0)
+
+            self.open_positions = {}
+            for venue_name, vpos in self.open_positions_by_venue.items():
+                self.open_positions.update(vpos)
+
+            total_recovered = len(self.open_positions)
+            self._startup_recovered = total_recovered > 0 or self.total_trades > 0 or own_state is not None
+
+            if self._startup_recovered:
+                logger.info(
+                    f"Estado recuperado de Redis: consecutive_losses={self.consecutive_losses}, "
+                    f"total_trades={self.total_trades}, open_positions={total_recovered}"
+                    f" ({', '.join(f'{v}={len(self.open_positions_by_venue[v])}' for v in VENUE_STATE_KEYS)})"
                 )
-                real_value = pt_cash + total_position_value
-                logger.info(f"Paper trading state: cash=${pt_cash:.2f}, positions={len(pt_positions)}, value=${real_value:.2f}")
+            else:
+                logger.info("Sin estado previo encontrado, iniciando desde cero")
 
-                if not own_state or abs(self.portfolio_value - real_value) > real_value * 0.5:
-                    logger.info(f"Syncing portfolio value from paper trading: ${real_value:.2f}")
-                    self.portfolio_value = real_value
-                    self.peak_value = max(self.peak_value, real_value)
-                    self.cash_available = pt_cash
-
-                if not own_state:
-                    self.open_positions = {
-                        oid: {
-                            "symbol": p.get("symbol", ""),
-                            "side": p.get("side", ""),
-                            "quantity_usd": float(p.get("quantity_usd", 0)),
-                        }
-                        for oid, p in pt_positions.items() if isinstance(p, dict)
-                    }
-
-            logger.info(f"Portfolio: value=${self.portfolio_value:.2f}, cash=${self.cash_available:.2f}, positions={len(self.open_positions)}")
         except Exception as e:
             logger.warning(f"Could not load portfolio state: {e}")
 
@@ -142,25 +181,48 @@ class RiskManager:
                 self.portfolio_value = float(stats.get("total_value", self.portfolio_value))
                 self.cash_available = float(stats.get("cash", self.cash_available))
 
-            pt_state = await self.redis.get_json("paper_trading:state")
-            if pt_state and pt_state.get("positions"):
-                self.open_positions = {
-                    oid: {
-                        "symbol": p.get("symbol", ""),
-                        "side": p.get("side", ""),
-                        "quantity_usd": float(p.get("quantity_usd", 0)),
-                    }
-                    for oid, p in pt_state["positions"].items() if isinstance(p, dict)
-                }
-                self.cash_available = float(pt_state.get("cash", self.cash_available))
-        except Exception:
-            pass
+            new_by_venue: dict[str, dict[str, dict]] = {
+                "paper": {}, "okx_testnet": {}, "okx_swap_testnet": {},
+            }
+            total_loaded = 0
+            for venue_name, state_key in VENUE_STATE_KEYS.items():
+                try:
+                    vstate = await self.redis.get_json(state_key)
+                    if vstate and vstate.get("positions"):
+                        for oid, pdata in vstate["positions"].items():
+                            if isinstance(pdata, dict):
+                                new_by_venue[venue_name][oid] = {
+                                    "symbol": pdata.get("symbol", ""),
+                                    "side": pdata.get("side", ""),
+                                    "quantity_usd": float(pdata.get("quantity_usd", 0)),
+                                    "venue": venue_name,
+                                }
+                                total_loaded += 1
+                        if venue_name == "paper" and vstate.get("cash"):
+                            self.cash_available = float(vstate["cash"])
+                except Exception as ve:
+                    logger.debug(f"Sync: could not read {state_key}: {ve}")
+
+            self.open_positions_by_venue = new_by_venue
+            self.open_positions = {}
+            for vname, vpos in self.open_positions_by_venue.items():
+                self.open_positions.update(vpos)
+            logger.info(
+                f"Synced positions from all venues: {total_loaded} total "
+                f"({', '.join(f'{v}={len(new_by_venue[v])}' for v in VENUE_STATE_KEYS)})"
+            )
+        except Exception as e:
+            logger.warning(f"Sync error: {e}")
 
     async def save_portfolio_state(self):
         state = {
             "total_value": self.portfolio_value,
             "peak_value": self.peak_value,
             "positions": self.open_positions,
+            "positions_by_venue": {
+                v: {oid: p for oid, p in vpos.items()}
+                for v, vpos in self.open_positions_by_venue.items()
+            },
             "consecutive_losses": self.consecutive_losses,
             "loss_cooldown_until": self.loss_cooldown_until,
             "total_trades": self.total_trades,
@@ -260,26 +322,46 @@ class RiskManager:
         reasons = []
         approved = True
 
+        has_position_in_symbol = any(
+            p.get("symbol") == signal.symbol for p in self.open_positions.values()
+        )
+        has_open_long = has_position_in_symbol and any(
+            p.get("symbol") == signal.symbol and p.get("side") == "buy"
+            for p in self.open_positions.values()
+        )
+        has_open_short = has_position_in_symbol and any(
+            p.get("symbol") == signal.symbol and p.get("side") == "sell"
+            for p in self.open_positions.values()
+        )
+        is_closing = (has_open_long and signal.signal == SignalType.SELL) or \
+                     (has_open_short and signal.signal == SignalType.BUY)
+
         circuit_data = await self.redis.get_json("circuit:state") if self.redis else None
         if circuit_data:
             if circuit_data.get("status") == "tripped":
                 resume_at = circuit_data.get("resume_at", "")
                 if resume_at > datetime.now(timezone.utc).isoformat():
-                    if signal.confidence >= 0.90:
+                    if is_closing:
+                        reasons.append(f"Circuit breaker bypass (close signal for {signal.symbol})")
+                    elif signal.confidence >= 0.90:
                         position_multiplier *= 0.5
                         reasons.append(f"Circuit breaker bypass (confidence {signal.confidence:.0%} >= 90%, size=50%)")
                     else:
                         approved = False
                         reasons.append(f"Circuit breaker active: {circuit_data.get('reason')} (resumes {resume_at})")
 
-        has_position_in_symbol = any(
-            p.get("symbol") == signal.symbol for p in self.open_positions.values()
+        total_positions = len(self.open_positions)
+        venue_counts = {v: len(self.open_positions_by_venue[v]) for v in VENUE_STATE_KEYS}
+        venue_limits_str = (
+            f"paper={MAX_POSITIONS_PAPER}(cur={venue_counts['paper']}) "
+            f"okx_spot={MAX_POSITIONS_OKX_SPOT}(cur={venue_counts['okx_testnet']}) "
+            f"okx_swap={MAX_POSITIONS_OKX_SWAP}(cur={venue_counts['okx_swap_testnet']}) "
+            f"total={total_positions}/{MAX_CONCURRENT_POSITIONS}"
         )
-        is_closing = has_position_in_symbol and signal.signal == SignalType.SELL
 
-        if len(self.open_positions) >= MAX_CONCURRENT_POSITIONS and not is_closing:
+        if total_positions >= MAX_CONCURRENT_POSITIONS and not is_closing:
             approved = False
-            reasons.append(f"Max positions reached ({len(self.open_positions)}/{MAX_CONCURRENT_POSITIONS})")
+            reasons.append(f"Max positions reached ({venue_limits_str})")
 
         max_dd, current_dd = self.check_drawdown()
         if max_dd:
@@ -403,10 +485,25 @@ class RiskManager:
         except Exception as e:
             logger.error(f"Error processing signal: {e}")
 
+    def _resolve_venue(self, data: dict) -> str:
+        venue = data.get("venue", "paper")
+        if venue in self.open_positions_by_venue:
+            return venue
+        order_id = data.get("order_id", "")
+        for vname, vpos in self.open_positions_by_venue.items():
+            if order_id in vpos:
+                return vname
+        state_key = data.get("_state_key", "")
+        for vname, sk in VENUE_STATE_KEYS.items():
+            if sk == state_key:
+                return vname
+        return "paper"
+
     async def update_from_trade_results(self, data: dict):
         try:
             status = str(data.get("status", ""))
             pnl = float(data.get("pnl_usd", 0))
+            venue = self._resolve_venue(data)
 
             if status == "closed":
                 self.total_trades += 1
@@ -430,25 +527,38 @@ class RiskManager:
                 order_id = data.get("order_id", "")
                 if order_id in self.open_positions:
                     del self.open_positions[order_id]
+                if venue in self.open_positions_by_venue and order_id in self.open_positions_by_venue[venue]:
+                    del self.open_positions_by_venue[venue][order_id]
 
                 symbol = data.get("symbol", "")
                 if symbol in self.signal_cooldowns:
                     del self.signal_cooldowns[symbol]
 
                 await self.save_portfolio_state()
+                logger.debug(f"Closed position {order_id} ({venue}): pnl=${pnl:.2f}, count={len(self.open_positions)}")
 
             elif status == "open":
                 order_id = data.get("order_id", "")
                 symbol = data.get("symbol", "")
                 side = data.get("side", "")
                 quantity_usd = float(data.get("quantity_usd", 0))
-                self.open_positions[order_id] = {
+                pos_data = {
                     "symbol": symbol,
                     "side": side,
                     "quantity_usd": quantity_usd,
+                    "venue": venue,
                 }
+                self.open_positions[order_id] = pos_data
+                if venue in self.open_positions_by_venue:
+                    self.open_positions_by_venue[venue][order_id] = pos_data
                 self.cash_available -= quantity_usd
                 await self.save_portfolio_state()
+
+                per_venue_counts = {v: len(self.open_positions_by_venue[v]) for v in VENUE_STATE_KEYS}
+                logger.info(
+                    f"Tracked new position {order_id} ({venue}): ${quantity_usd:.2f}, "
+                    f"per_venue={per_venue_counts}, combined={len(self.open_positions)}"
+                )
 
         except Exception as e:
             logger.error(f"Error updating from trade result: {e}")

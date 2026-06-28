@@ -187,7 +187,10 @@ services:
       DB_USER: ${TIMESCALE_USER:-trader}
       DB_PASSWORD: ${TIMESCALE_PASSWORD:-trader123}
       OLLAMA_HOST: ${OLLAMA_HOST:-http://host.docker.internal:11434}
-      RISK_AUTOTUNE_ENABLED: ${RISK_AUTOTUNE_ENABLED:-true}
+      MAX_POSITIONS_PAPER: ${MAX_POSITIONS_PAPER:-10}
+      MAX_POSITIONS_OKX_SPOT: ${MAX_POSITIONS_OKX_SPOT:-6}
+      MAX_POSITIONS_OKX_SWAP: ${MAX_POSITIONS_OKX_SWAP:-4}
+      RISK_AUTOTUNE_ENABLED: ${RISK_AUTOTUNE_ENABLED:-false}
       RISK_AUTOTUNE_INTERVAL: ${RISK_AUTOTUNE_INTERVAL:-300}
       RISK_AUTOTUNE_MODEL: ${RISK_AUTOTUNE_MODEL:-qwen2.5:3b}
     extra_hosts:
@@ -240,6 +243,9 @@ services:
       TRADING_FEE_PCT: ${TRADING_FEE_PCT:-0.00075}
       INITIAL_CAPITAL: ${INITIAL_CAPITAL:-1000.0}
       BASE_CURRENCY: ${BASE_CURRENCY:-USDT}
+      MAX_POSITIONS_PAPER: ${MAX_POSITIONS_PAPER:-10}
+      MAX_POSITIONS_OKX_SPOT: ${MAX_POSITIONS_OKX_SPOT:-6}
+      MAX_POSITIONS_OKX_SWAP: ${MAX_POSITIONS_OKX_SWAP:-4}
       PT_INSTANCE: main
       PT_STATE_KEY: paper_trading:state
       PT_STATS_KEY: portfolio:stats
@@ -315,75 +321,6 @@ services:
     restart: unless-stopped
     networks:
       - trader-net
-  stop-loss-tracker:
-    build:
-      context: .
-      dockerfile: services/stop-loss-tracker/Dockerfile
-    environment:
-      REDIS_HOST: redis
-      REDIS_PORT: 6379
-      DB_HOST: timescaledb
-      DB_PORT: 5432
-      DB_NAME: ${TIMESCALE_DB:-trader}
-      DB_USER: ${TIMESCALE_USER:-trader}
-      DB_PASSWORD: ${TIMESCALE_PASSWORD:-trader123}
-    depends_on:
-      redis:
-        condition: service_healthy
-      timescaledb:
-        condition: service_healthy
-    restart: unless-stopped
-    networks:
-      - trader-net
-  feedback:
-    build:
-      context: .
-      dockerfile: services/qwen-analyzer/Dockerfile
-    environment:
-      REDIS_HOST: redis
-      REDIS_PORT: 6379
-      DB_HOST: timescaledb
-      DB_PORT: 5432
-      DB_NAME: ${TIMESCALE_DB:-trader}
-      DB_USER: ${TIMESCALE_USER:-trader}
-      DB_PASSWORD: ${TIMESCALE_PASSWORD:-trader123}
-      OLLAMA_HOST: ${OLLAMA_HOST:-http://host.docker.internal:11434}
-      OLLAMA_MODEL: ${OLLAMA_MODEL:-qwen2.5:3b}
-    depends_on:
-      redis:
-        condition: service_healthy
-      timescaledb:
-        condition: service_healthy
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
-    restart: unless-stopped
-    networks:
-      - trader-net
-    command: ["python", "/app/service/feedback.py"]
-    profiles: ["disabled"]
-
-  strategy-router:
-    build:
-      context: .
-      dockerfile: services/strategy-router/Dockerfile
-    environment:
-      REDIS_HOST: redis
-      REDIS_PORT: 6379
-      DB_HOST: timescaledb
-      DB_PORT: 5432
-      DB_NAME: ${TIMESCALE_DB:-trader}
-      DB_USER: ${TIMESCALE_USER:-trader}
-      DB_PASSWORD: ${TIMESCALE_PASSWORD:-trader123}
-    depends_on:
-      redis:
-        condition: service_healthy
-      timescaledb:
-        condition: service_healthy
-    restart: unless-stopped
-    networks:
-      - trader-net
-    profiles: ["disabled"]
-
   sentiment:
     build:
       context: .
@@ -420,30 +357,6 @@ services:
     restart: unless-stopped
     networks:
       - trader-net
-  training-export:
-    build:
-      context: .
-      dockerfile: services/training-export/Dockerfile
-    environment:
-      REDIS_HOST: redis
-      REDIS_PORT: 6379
-      DB_HOST: timescaledb
-      DB_PORT: 5432
-      DB_NAME: ${TIMESCALE_DB:-trader}
-      DB_USER: ${TIMESCALE_USER:-trader}
-      DB_PASSWORD: ${TIMESCALE_PASSWORD:-trader123}
-    depends_on:
-      redis:
-        condition: service_healthy
-      timescaledb:
-        condition: service_healthy
-    volumes:
-      - training_data:/app/data
-    restart: unless-stopped
-    networks:
-      - trader-net
-    profiles: ["disabled"]
-
   evolution-agent:
     build:
       context: .
@@ -490,21 +403,6 @@ services:
     restart: unless-stopped
     networks:
       - trader-net
-
-  ab-promoter:
-    build:
-      context: .
-      dockerfile: services/ab-promoter/Dockerfile
-    environment:
-      REDIS_HOST: redis
-      REDIS_PORT: 6379
-    depends_on:
-      redis:
-        condition: service_healthy
-    restart: unless-stopped
-    networks:
-      - trader-net
-    profiles: ["disabled"]
 
   regime-detector:
     build:
@@ -568,6 +466,9 @@ services:
       INITIAL_CAPITAL: ${INITIAL_CAPITAL:-1000.0}
       BASE_CURRENCY: ${BASE_CURRENCY:-USDT}
       PT_INSTANCE: okx
+      MAX_POSITIONS_PAPER: ${MAX_POSITIONS_PAPER:-10}
+      MAX_POSITIONS_OKX_SPOT: ${MAX_POSITIONS_OKX_SPOT:-6}
+      MAX_POSITIONS_OKX_SWAP: ${MAX_POSITIONS_OKX_SWAP:-4}
       PT_STATE_KEY: paper_trading:state:okx
       PT_STATS_KEY: portfolio:stats:okx
       PT_VENUE: okx_testnet
@@ -601,6 +502,9 @@ services:
       INITIAL_CAPITAL: ${INITIAL_CAPITAL:-1000.0}
       BASE_CURRENCY: ${BASE_CURRENCY:-USDT}
       PT_INSTANCE: okx-swap
+      MAX_POSITIONS_PAPER: ${MAX_POSITIONS_PAPER:-10}
+      MAX_POSITIONS_OKX_SPOT: ${MAX_POSITIONS_OKX_SPOT:-6}
+      MAX_POSITIONS_OKX_SWAP: ${MAX_POSITIONS_OKX_SWAP:-4}
       PT_STATE_KEY: paper_trading:state:okx_swap
       PT_STATS_KEY: portfolio:stats:okx_swap
       PT_VENUE: okx_swap_testnet
@@ -619,50 +523,10 @@ services:
     networks:
       - trader-net
 
-  nautilus-bridge:
-    build:
-      context: .
-      dockerfile: services/nautilus-bridge/Dockerfile
-    environment:
-      REDIS_HOST: redis
-      REDIS_PORT: 6379
-      DB_HOST: timescaledb
-      DB_PORT: 5432
-      DB_NAME: trader
-      DB_USER: trader
-      DB_PASSWORD: trader123
-      NAUTILUS_ENABLED: "true"
-    depends_on:
-      - redis
-      - timescaledb
-    restart: unless-stopped
-    networks:
-      - trader-net
-    profiles: ["nautilus"]
-
-  swarm-coordinator:
-    build:
-      context: .
-      dockerfile: services/swarm-coordinator/Dockerfile
-    environment:
-      REDIS_HOST: redis
-      REDIS_PORT: 6379
-      OLLAMA_HOST: ${OLLAMA_HOST:-http://host.docker.internal:11434}
-      OLLAMA_MODEL: gemma3:4b
-    depends_on:
-      - redis
-    restart: unless-stopped
-    networks:
-      - trader-net
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
-    profiles: ["swarm"]
-
 volumes:
   redis_data:
   timescale_data:
   backtest_data:
-  training_data:
   evolution_data:
   grafana_data:
   monitoring_logs:

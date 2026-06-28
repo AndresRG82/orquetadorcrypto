@@ -61,6 +61,7 @@ class TradingSignal(BaseModel):
     target_price: Optional[float] = None
     stop_loss: Optional[float] = None
     indicators_snapshot: Optional[TechnicalIndicators] = None
+    batch_id: Optional[str] = None
 
 
 class RiskAssessment(BaseModel):
@@ -91,6 +92,7 @@ class TradeOrder(BaseModel):
 
 class TradeResult(BaseModel):
     order_id: str
+    signal_id: str = ""
     symbol: str
     side: SignalType
     entry_price: float
@@ -99,6 +101,7 @@ class TradeResult(BaseModel):
     quantity_usd: float
     fee_usd: float
     slippage_usd: float
+    funding_usd: float = 0.0
     pnl_usd: float
     status: OrderStatus
     strategy: str

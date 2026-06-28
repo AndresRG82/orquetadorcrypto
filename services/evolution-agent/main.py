@@ -83,9 +83,6 @@ class EvolutionAgent:
         nautilus = await self.redis.get_json("nautilus:latest")
         snapshot["nautilus"] = nautilus or {}
 
-        training = await self.redis.get_json("training:export_stats")
-        snapshot["training"] = training or {}
-
         strategy_metrics = []
         try:
             rows = await self.db.fetch(
@@ -317,6 +314,8 @@ class EvolutionAgent:
         symbols = settings.TOP_PAIRS[:2]
         timeframes_map = {"scalping": "5m", "swing": "1h", "arbitrage": "1h"}
         htf_map = {"scalping": "1h", "swing": "1d"}
+        test_split = float(os.getenv("EVO_TEST_SPLIT", "0.2"))
+        oos_sharpe_min = float(os.getenv("EVO_OOS_SHARPE_MIN", "0.3"))
         all_results = []
 
         for strategy in strategies:
@@ -330,6 +329,15 @@ class EvolutionAgent:
             if strategy in htf_map:
                 df_htf = await self.fetch_ohlcv_for_sweep(symbols[0], htf_map[strategy], days=30)
 
+            split_idx = int(len(df) * (1 - test_split))
+            df_train = df.iloc[:split_idx].copy()
+            df_test = df.iloc[split_idx:].copy()
+
+            df_htf_train = df_htf.iloc[:int(len(df_htf) * (1 - test_split))].copy() if df_htf is not None and len(df_htf) > 50 else None
+            df_htf_test = df_htf.iloc[int(len(df_htf) * (1 - test_split)):].copy() if df_htf is not None and len(df_htf) > 50 else None
+
+            logger.info(f"Train: {len(df_train)} rows, Test: {len(df_test)} rows ({test_split*100:.0f}%)")
+
             param_grid = self._param_grid(strategy)
             keys = list(param_grid.keys())
             values = list(param_grid.values())
@@ -338,31 +346,55 @@ class EvolutionAgent:
 
             import time as _time
             start = _time.time()
-            results = []
+            train_results = []
             for i, combo in enumerate(combos):
                 if _time.time() - start > 120:
                     logger.warning(f"Sweep timeout for {strategy} after {i}/{len(combos)} combos")
                     break
                 params = dict(zip(keys, combo))
                 try:
-                    r = self.run_vectorbt_backtest(df, strategy, params, df_htf=df_htf)
+                    r = self.run_vectorbt_backtest(df_train, strategy, params, df_htf=df_htf_train)
                     r["params"] = params
-                    results.append(r)
+                    train_results.append(r)
                 except Exception as e:
                     pass
 
-            results = [r for r in results if "error" not in r and r.get("total_trades", 0) > 0]
-            results.sort(key=lambda x: x.get("sharpe_ratio", 0), reverse=True)
+            train_results = [r for r in train_results if "error" not in r and r.get("total_trades", 0) > 0]
+            train_results.sort(key=lambda x: x.get("sharpe_ratio", 0), reverse=True)
 
-            if results:
-                best = results[0]
-                logger.info(
-                    f"Best {strategy}: Sharpe={best['sharpe_ratio']:.2f} PnL=${best['total_pnl']:.2f} "
-                    f"WR={best['win_rate']:.1f}% params={best['params']}"
-                )
-                all_results.append({"strategy": strategy, "best": best, "top_5": results[:5]})
-            else:
-                logger.warning(f"No valid results for {strategy} sweep")
+            if not train_results:
+                logger.warning(f"No valid train results for {strategy}")
+                continue
+
+            logger.info(f"Best {strategy} in-sample: Sharpe={train_results[0]['sharpe_ratio']:.2f} params={train_results[0]['params']}")
+
+            best_oos = None
+            top_5 = train_results[:5]
+            for r in top_5:
+                try:
+                    oos_r = self.run_vectorbt_backtest(df_test, strategy, r["params"], df_htf=df_htf_test)
+                    r["oos_sharpe"] = oos_r.get("sharpe_ratio", 0)
+                    r["oos_pnl"] = oos_r.get("total_pnl", 0)
+                    if best_oos is None or (oos_r.get("sharpe_ratio", -999) > best_oos.get("oos_sharpe", -999)):
+                        best_oos = r.copy()
+                        best_oos.update({f"oos_{k}": oos_r.get(k) for k in ("sharpe_ratio", "total_pnl", "win_rate", "max_drawdown_pct")})
+                except Exception as e:
+                    logger.warning(f"OOS eval failed for {r.get('params')}: {e}")
+
+            best = best_oos or train_results[0]
+            logger.info(
+                f"Best {strategy}: IS Sharpe={best.get('sharpe_ratio', 0):.2f} "
+                f"OOS Sharpe={best.get('oos_sharpe_ratio', 0):.2f} "
+                f"PnL=${best.get('total_pnl', 0):.2f} params={best.get('params', {})}"
+            )
+
+            all_results.append({
+                "strategy": strategy,
+                "best": best,
+                "top_5": top_5,
+                "test_split": test_split,
+                "oos_approved": best.get("oos_sharpe_ratio", 0) >= oos_sharpe_min,
+            })
 
         await self.redis.set_json("evolution:vectorbt_sweep", {
             "timestamp": datetime.now(timezone.utc).isoformat(),
@@ -374,6 +406,11 @@ class EvolutionAgent:
         applied = []
         for result in sweep_results:
             strategy = result["strategy"]
+            oos_approved = result.get("oos_approved", False)
+            if not oos_approved:
+                logger.info(f"Skipping {strategy}: OOS Sharpe < threshold, not deploying")
+                continue
+
             best = result["best"]
             params = best.get("params", {})
 

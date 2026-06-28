@@ -29,12 +29,16 @@ class Portfolio:
     def open_position(self, order_id: str, symbol: str, side: str, quantity: float,
                       entry_price: float, quantity_usd: float, stop_loss: float = None,
                       take_profit: float = None, strategy: str = "", confidence: float = 0.0,
-                      reasoning: str = "", leverage: float = 1.0) -> Optional[dict]:
+                      reasoning: str = "", leverage: float = 1.0,
+                      fee_rate: float | None = None,
+                      slippage_rate: float | None = None) -> Optional[dict]:
         margin = quantity_usd
         notional = margin * leverage
-        fee = notional * float(settings.TRADING_FEE_PCT)
-        slippage = notional * float(settings.SLIPPAGE_PCT)
-        effective_price = entry_price * (1 + float(settings.SLIPPAGE_PCT)) if side == "buy" else entry_price * (1 - float(settings.SLIPPAGE_PCT))
+        _fee_rate = fee_rate if fee_rate is not None else float(settings.TRADING_FEE_PCT)
+        _slippage_rate = slippage_rate if slippage_rate is not None else float(settings.SLIPPAGE_PCT)
+        fee = notional * _fee_rate
+        slippage = notional * _slippage_rate
+        effective_price = entry_price * (1 + _slippage_rate) if side == "buy" else entry_price * (1 - _slippage_rate)
         quantity = notional / effective_price
 
         cost = margin + fee + slippage
@@ -47,8 +51,8 @@ class Portfolio:
             margin = effective_margin
             notional = margin * leverage
             quantity = notional / effective_price
-            fee = notional * float(settings.TRADING_FEE_PCT)
-            slippage = notional * float(settings.SLIPPAGE_PCT)
+            fee = notional * _fee_rate
+            slippage = notional * _slippage_rate
             cost = margin + fee + slippage
 
         self.cash -= cost
@@ -66,6 +70,8 @@ class Portfolio:
             "leverage": leverage,
             "fee": fee,
             "slippage": slippage,
+            "fee_rate": _fee_rate,
+            "slippage_rate": _slippage_rate,
             "stop_loss": stop_loss,
             "take_profit": take_profit,
             "strategy": strategy,
@@ -104,29 +110,32 @@ class Portfolio:
         )
         return result
 
-    def close_position(self, order_id: str, close_price: float, reason: str = "") -> Optional[dict]:
+    def close_position(self, order_id: str, close_price: float, reason: str = "",
+                       funding_charge: float = 0.0) -> Optional[dict]:
         if order_id not in self.positions:
             logger.warning(f"Position not found: {order_id}")
             return None
 
         pos = self.positions[order_id]
-        effective_close = close_price * (1 - float(settings.SLIPPAGE_PCT)) if pos["side"] == "buy" else close_price * (1 + float(settings.SLIPPAGE_PCT))
+        _slippage_rate = pos.get("slippage_rate") or float(settings.SLIPPAGE_PCT)
+        _fee_rate = pos.get("fee_rate") or float(settings.TRADING_FEE_PCT)
+        effective_close = close_price * (1 - _slippage_rate) if pos["side"] == "buy" else close_price * (1 + _slippage_rate)
 
-        fee = pos["quantity"] * effective_close * float(settings.TRADING_FEE_PCT)
+        fee = pos["quantity"] * effective_close * _fee_rate
         slippage = abs(effective_close - close_price) * pos["quantity"]
         self.total_fees += fee
         self.total_slippage += slippage
 
         if pos["side"] == "buy":
-            gross_pnl = (effective_close - pos["entry_price"]) * pos["quantity"]
+            gross_pnl = (close_price - pos["entry_price"]) * pos["quantity"]
         else:
-            gross_pnl = (pos["entry_price"] - effective_close) * pos["quantity"]
+            gross_pnl = (pos["entry_price"] - close_price) * pos["quantity"]
 
-        net_pnl = gross_pnl - fee
-        leverage = pos.get("leverage", 1.0)
-        margin = pos.get("margin", pos["quantity_usd"])
+        net_pnl = gross_pnl - fee - slippage - funding_charge
+        leverage = pos.get("leverage") or 1.0
+        margin = pos.get("margin") or pos["quantity_usd"]
         proceeds = margin + gross_pnl
-        self.cash += proceeds - fee
+        self.cash += proceeds - fee - slippage - funding_charge
 
         del self.positions[order_id]
 
@@ -142,6 +151,7 @@ class Portfolio:
             "leverage": leverage,
             "fee_usd": fee,
             "slippage_usd": slippage,
+            "funding_usd": funding_charge,
             "pnl_usd": net_pnl,
             "status": "closed",
             "strategy": pos.get("strategy", ""),

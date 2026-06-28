@@ -50,6 +50,7 @@ SELECT create_hypertable('signals', 'time', if_not_exists => TRUE);
 CREATE TABLE IF NOT EXISTS trades (
     time TIMESTAMPTZ NOT NULL,
     order_id TEXT NOT NULL,
+    signal_id TEXT DEFAULT '',
     symbol TEXT NOT NULL,
     side TEXT NOT NULL,
     entry_price DOUBLE PRECISION,
@@ -57,6 +58,8 @@ CREATE TABLE IF NOT EXISTS trades (
     quantity DOUBLE PRECISION,
     quantity_usd DOUBLE PRECISION,
     fee_usd DOUBLE PRECISION,
+    slippage_usd DOUBLE PRECISION DEFAULT 0,
+    funding_usd DOUBLE PRECISION DEFAULT 0,
     pnl_usd DOUBLE PRECISION,
     status TEXT NOT NULL,
     strategy TEXT,
@@ -67,6 +70,10 @@ CREATE TABLE IF NOT EXISTS trades (
     venue VARCHAR(32) DEFAULT 'paper'
 );
 SELECT create_hypertable('trades', 'time', if_not_exists => TRUE);
+
+ALTER TABLE trades ADD COLUMN IF NOT EXISTS slippage_usd DOUBLE PRECISION DEFAULT 0;
+ALTER TABLE trades ADD COLUMN IF NOT EXISTS funding_usd DOUBLE PRECISION DEFAULT 0;
+ALTER TABLE trades ADD COLUMN IF NOT EXISTS signal_id TEXT DEFAULT '';
 
 CREATE TABLE IF NOT EXISTS portfolio_snapshots (
     time TIMESTAMPTZ NOT NULL,

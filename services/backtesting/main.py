@@ -231,8 +231,104 @@ class BacktestEngine:
         logger.info(f"Sweep complete: {len(results)} valid results, best Sharpe={results[0]['sharpe_ratio']:.2f}" if results else "No valid results")
         return results
 
+    def _split_train_test(self, df: pd.DataFrame, test_split: float = 0.2) -> tuple[pd.DataFrame, pd.DataFrame]:
+        split_idx = int(len(df) * (1 - test_split))
+        df_train = df.iloc[:split_idx].copy()
+        df_test = df.iloc[split_idx:].copy()
+        return df_train, df_test
+
+    def run_walk_forward(self, df: pd.DataFrame, strategy: str, params: dict,
+                         df_htf: Optional[pd.DataFrame] = None,
+                         window_size: int = 2000, test_size: int = 500,
+                         step_size: int = 500,
+                         initial_capital: float = 1000.0) -> dict:
+        total_len = len(df)
+        min_required = window_size + test_size
+        if total_len < min_required:
+            return {"type": "walk_forward", "error": f"Insufficient data: {total_len} bars, need {min_required}",
+                    "total_walks": 0}
+
+        start_positions = list(range(0, total_len - min_required + 1, step_size))
+        logger.info(f"Walk-forward: {len(start_positions)} windows over {total_len} bars "
+                    f"(window={window_size}, test={test_size}, step={step_size})")
+
+        walks = []
+        for i, start in enumerate(start_positions):
+            train_end = start + window_size
+            test_end = train_end + test_size
+            df_train = df.iloc[start:train_end].copy()
+            df_test = df.iloc[train_end:test_end].copy()
+
+            df_htf_train = None
+            df_htf_test = None
+            if df_htf is not None and len(df_htf) > 50:
+                htf_total = len(df_htf)
+                htf_start = int(start * htf_total / total_len)
+                htf_mid = int(train_end * htf_total / total_len)
+                htf_end = int(test_end * htf_total / total_len)
+                df_htf_train = df_htf.iloc[htf_start:htf_mid].copy() if htf_mid > htf_start else None
+                df_htf_test = df_htf.iloc[htf_mid:htf_end].copy() if htf_end > htf_mid else None
+
+            train_result, _ = self.run_vectorbt_backtest(df_train, strategy, params, initial_capital, df_htf=df_htf_train)
+            test_result, _ = self.run_vectorbt_backtest(df_test, strategy, params, initial_capital, df_htf=df_htf_test)
+
+            walk = {
+                "window": i,
+                "train_bars": len(df_train),
+                "test_bars": len(df_test),
+                "train": {k: train_result.get(k) for k in ("sharpe_ratio", "total_pnl", "win_rate", "total_trades")},
+                "test": {k: test_result.get(k) for k in ("sharpe_ratio", "total_pnl", "win_rate", "total_trades")},
+            }
+            walks.append(walk)
+            logger.info(
+                f"  Walk[{i}] train: Sharpe={train_result.get('sharpe_ratio', 0):.2f} "
+                f"PnL=${train_result.get('total_pnl', 0):.2f} | "
+                f"test: Sharpe={test_result.get('sharpe_ratio', 0):.2f} "
+                f"PnL=${test_result.get('total_pnl', 0):.2f}"
+            )
+
+        if not walks:
+            return {"type": "walk_forward", "error": "No walks completed", "total_walks": 0}
+
+        def _safe_extract(key, default=0.0):
+            vals = []
+            for w in walks:
+                v = w["test"].get(key)
+                if v is None or (isinstance(v, float) and (np.isnan(v) or np.isinf(v))):
+                    v = default
+                vals.append(v)
+            return np.array(vals, dtype=np.float64)
+
+        oos_sharpes = _safe_extract("sharpe_ratio")
+        oos_pnls = _safe_extract("total_pnl")
+        positive_sharpe_walks = int(np.sum(oos_sharpes > 0))
+
+        def _best_walk(key, reverse=True):
+            valid = [w for w in walks if isinstance(w["test"].get(key), (int, float))
+                     and not np.isnan(w["test"][key]) and not np.isinf(w["test"][key])]
+            if not valid:
+                return None
+            return max(valid, key=lambda w: w["test"].get(key, -1e9) if reverse else -w["test"].get(key, 1e9))
+
+        return {
+            "type": "walk_forward",
+            "total_walks": len(walks),
+            "window_size": window_size,
+            "test_size": test_size,
+            "step_size": step_size,
+            "avg_oos_sharpe": float(np.mean(oos_sharpes)) if len(oos_sharpes) > 0 else 0.0,
+            "avg_oos_pnl": float(np.mean(oos_pnls)) if len(oos_pnls) > 0 else 0.0,
+            "consistency_pct": float(positive_sharpe_walks / len(walks) * 100) if walks else 0.0,
+            "oos_sharpe_std": float(np.std(oos_sharpes)) if len(oos_sharpes) > 1 else 0.0,
+            "oos_sharpe_ratio": float(np.mean(oos_sharpes)) if len(oos_sharpes) > 0 else 0.0,
+            "best_walk": _best_walk("sharpe_ratio", reverse=True),
+            "worst_walk": _best_walk("sharpe_ratio", reverse=False),
+            "walk_count_with_positive_sharpe": positive_sharpe_walks,
+        }
+
     async def run_backtest(self, strategy: str, symbol: str, timeframe: str, days: int = 30,
-                           initial_capital: float = 1000.0, params: dict = None) -> dict:
+                           initial_capital: float = 1000.0, params: dict = None,
+                           test_split: float = 0.0) -> dict:
         df = await self.fetch_ohlcv(symbol, timeframe, days)
         if df is None or len(df) < 50:
             return {"error": f"Insufficient data for {symbol} {timeframe}", "strategy": strategy}
@@ -249,6 +345,30 @@ class BacktestEngine:
         result["symbol"] = symbol
         result["timeframe"] = timeframe
         result["period_days"] = days
+
+        if test_split > 0 and len(df) > 100:
+            df_train, df_test = self._split_train_test(df, test_split)
+
+            df_htf_train = df_htf.iloc[:int(len(df_htf) * (1 - test_split))].copy() if df_htf is not None and len(df_htf) > 50 else None
+            df_htf_test = df_htf.iloc[int(len(df_htf) * (1 - test_split)):].copy() if df_htf is not None and len(df_htf) > 50 else None
+
+            train_result, _ = self.run_vectorbt_backtest(df_train, strategy, params, initial_capital, df_htf=df_htf_train)
+            test_result, _ = self.run_vectorbt_backtest(df_test, strategy, params, initial_capital, df_htf=df_htf_test)
+
+            result["in_sample"] = {k: train_result.get(k) for k in ("sharpe_ratio", "total_pnl", "win_rate", "max_drawdown_pct", "profit_factor", "total_trades")}
+            result["out_of_sample"] = {k: test_result.get(k) for k in ("sharpe_ratio", "total_pnl", "win_rate", "max_drawdown_pct", "profit_factor", "total_trades")}
+            result["oos_sharpe_ratio"] = test_result.get("sharpe_ratio", 0)
+            result["test_split"] = test_split
+            logger.info(
+                f"  In-sample:  Sharpe={train_result.get('sharpe_ratio', 0):.2f} "
+                f"PnL=${train_result.get('total_pnl', 0):.2f}"
+            )
+            logger.info(
+                f"  Out-of-sample: Sharpe={test_result.get('sharpe_ratio', 0):.2f} "
+                f"PnL=${test_result.get('total_pnl', 0):.2f}"
+            )
+        else:
+            result["test_split"] = 0.0
 
         if portfolio_returns is not None and len(portfolio_returns) > 10:
             benchmark_returns = df["close"].pct_change().dropna()
@@ -313,6 +433,10 @@ class BacktestEngine:
             }
         return {}
 
+    WALK_FORWARD_CONFIG = {
+        "scalping": {"5m": {"window_size": 2000, "test_size": 500, "step_size": 500}},
+    }
+
     async def run_all_backtests(self):
         strategies = ["scalping", "swing", "arbitrage"]
         symbols = settings.TOP_PAIRS[:5]
@@ -322,7 +446,13 @@ class BacktestEngine:
         for strategy in strategies:
             for symbol in symbols:
                 for tf in timeframes_map.get(strategy, ["1h"]):
-                    result = await self.run_backtest(strategy, symbol, tf, days=30)
+                    wf_config = self.WALK_FORWARD_CONFIG.get(strategy, {}).get(tf)
+                    if wf_config:
+                        result = await self.run_walk_forward_backtest(
+                            strategy, symbol, tf, days=30, **wf_config
+                        )
+                    else:
+                        result = await self.run_backtest(strategy, symbol, tf, days=30, test_split=0.2)
                     results.append(result)
 
         await self.redis.set_json("backtest:latest", {
@@ -330,6 +460,41 @@ class BacktestEngine:
             "results": results,
         })
         return results
+
+    async def run_walk_forward_backtest(self, strategy: str, symbol: str, timeframe: str,
+                                         days: int = 30, initial_capital: float = 1000.0,
+                                         params: dict = None,
+                                         window_size: int = 2000, test_size: int = 500,
+                                         step_size: int = 500) -> dict:
+        df = await self.fetch_ohlcv(symbol, timeframe, days)
+        if df is None or len(df) < 50:
+            return {"error": f"Insufficient data for {symbol} {timeframe}", "strategy": strategy}
+
+        if params is None:
+            params = await self.redis.get_json(f"strategy:params:{strategy}") or {}
+
+        htf_map = {"scalping": "1h", "swing": "1d"}
+        df_htf = None
+        if strategy in htf_map:
+            df_htf = await self.fetch_ohlcv(symbol, htf_map[strategy], days)
+
+        wf_result = self.run_walk_forward(df, strategy, params, df_htf=df_htf,
+                                           window_size=window_size, test_size=test_size,
+                                           step_size=step_size, initial_capital=initial_capital)
+
+        result = {"strategy": strategy, "symbol": symbol, "timeframe": timeframe,
+                   "period_days": days, "walk_forward": wf_result}
+        if wf_result.get("total_walks", 0) > 0:
+            result["oos_sharpe_ratio"] = wf_result["avg_oos_sharpe"]
+            result["consistency_pct"] = wf_result["consistency_pct"]
+
+        await self.redis.set_json(f"backtest:{strategy}:{symbol}:{timeframe}", result)
+        logger.info(
+            f"Walk-forward {strategy} {symbol} {timeframe}: {wf_result.get('total_walks', 0)} walks, "
+            f"avg OOS Sharpe={wf_result.get('avg_oos_sharpe', 0):.2f} "
+            f"consistency={wf_result.get('consistency_pct', 0):.1f}%"
+        )
+        return result
 
     async def run(self):
         self.running = True

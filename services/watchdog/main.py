@@ -57,7 +57,6 @@ CONSUMER_MAP = {
             "orchestrator-results": "crypto-trader-orchestrator-1",
             "risk-manager-results": "crypto-trader-risk-manager-1",
             "stop-loss-results": "crypto-trader-stop-loss-1",
-            "feedback-loop": "crypto-trader-feedback-1",
         },
     },
 }

@@ -38,6 +38,18 @@ class Settings:
     SLIPPAGE_PCT: float = float(os.getenv("SLIPPAGE_PCT", "0.001"))
     TRADING_FEE_PCT: float = float(os.getenv("TRADING_FEE_PCT", "0.00075"))
 
+    TRADING_FEE_SPOT_PCT: float = float(os.getenv("TRADING_FEE_SPOT_PCT", "0.001"))
+    TRADING_FEE_PERP_PCT: float = float(os.getenv("TRADING_FEE_PERP_PCT", "0.0005"))
+    FUNDING_RATE_8H: float = float(os.getenv("FUNDING_RATE_8H", "0.0003"))
+
+    SLIPPAGE_PCT_BY_SYMBOL: dict[str, float] = {
+        "BTC/USDT": 0.0005,
+        "ETH/USDT": 0.0005,
+        "SOL/USDT": 0.001,
+        "BNB/USDT": 0.001,
+    }
+    SLIPPAGE_DEFAULT_ALT: float = 0.002
+
     QWEN_ANALYZER_URL: str = os.getenv("QWEN_ANALYZER_URL", "http://localhost:8000")
 
     STREAM_MARKET_DATA: str = "market:data"

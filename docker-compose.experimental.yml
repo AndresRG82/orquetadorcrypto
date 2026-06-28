@@ -1,0 +1,43 @@
+services:
+  nautilus-bridge:
+    build:
+      context: .
+      dockerfile: services/nautilus-bridge/Dockerfile
+    environment:
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      DB_HOST: timescaledb
+      DB_PORT: 5432
+      DB_NAME: trader
+      DB_USER: trader
+      DB_PASSWORD: trader123
+      NAUTILUS_ENABLED: "true"
+    depends_on:
+      - redis
+      - timescaledb
+    restart: unless-stopped
+    networks:
+      - trader-net
+    profiles: ["nautilus"]
+
+  swarm-coordinator:
+    build:
+      context: .
+      dockerfile: services/swarm-coordinator/Dockerfile
+    environment:
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      OLLAMA_HOST: ${OLLAMA_HOST:-http://host.docker.internal:11434}
+      OLLAMA_MODEL: gemma3:4b
+    depends_on:
+      - redis
+    restart: unless-stopped
+    networks:
+      - trader-net
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    profiles: ["swarm"]
+
+networks:
+  trader-net:
+    external: true

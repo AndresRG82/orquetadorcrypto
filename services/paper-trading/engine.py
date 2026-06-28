@@ -35,6 +35,15 @@ TIME_FILTER = os.getenv("PT_TIME_FILTER", "")  # e.g. "5,6,8,17,22" (UTC hours) 
 SWAP_ENABLED = os.getenv("PT_SWAP_ENABLED", "").lower() == "true"
 LEVERAGE = float(os.getenv("PT_LEVERAGE", "1"))
 
+MAX_POSITIONS_PAPER = int(os.getenv("MAX_POSITIONS_PAPER", "10"))
+MAX_POSITIONS_OKX_SPOT = int(os.getenv("MAX_POSITIONS_OKX_SPOT", "6"))
+MAX_POSITIONS_OKX_SWAP = int(os.getenv("MAX_POSITIONS_OKX_SWAP", "4"))
+MAX_POSITIONS_BY_VENUE: dict[str, int] = {
+    "paper": MAX_POSITIONS_PAPER,
+    "okx_testnet": MAX_POSITIONS_OKX_SPOT,
+    "okx_swap_testnet": MAX_POSITIONS_OKX_SWAP,
+}
+
 
 class PaperTradingEngine:
     def __init__(self):
@@ -163,6 +172,12 @@ class PaperTradingEngine:
             return swap_sym
         return symbol
 
+    def _get_slippage_rate(self, symbol: str) -> float:
+        return settings.SLIPPAGE_PCT_BY_SYMBOL.get(symbol, settings.SLIPPAGE_DEFAULT_ALT)
+
+    def _get_fee_rate(self) -> float:
+        return settings.TRADING_FEE_PERP_PCT if SWAP_ENABLED else settings.TRADING_FEE_SPOT_PCT
+
     async def _fetch_testnet_balance(self) -> float:
         if not self.exchange:
             return INITIAL_CAPITAL
@@ -215,12 +230,106 @@ class PaperTradingEngine:
                     filled_qty = filled_qty * contract_size
                 except Exception:
                     pass
+            fee_info = filled.get("fee", {})
+            order_fee = float(fee_info["cost"]) if fee_info and fee_info.get("cost") else 0.0
+
             if avg_price > 0 and filled_qty > 0:
-                logger.info(f"[{INSTANCE_ID}] Testnet fill: {side} {filled_qty:.6f} {symbol} @ ${avg_price:.4f}")
-                return {"price": avg_price, "quantity": filled_qty, "order_id": filled["id"]}
+                logger.info(f"[{INSTANCE_ID}] Testnet fill: {side} {filled_qty:.6f} {symbol} @ ${avg_price:.4f} fee=${order_fee:.4f}")
+                return {"price": avg_price, "quantity": filled_qty, "order_id": filled["id"], "fee": order_fee}
         except Exception as e:
             logger.warning(f"[{INSTANCE_ID}] Testnet order failed: {e}")
         return None
+
+    async def _reconcile_positions(self):
+        if not self.use_testnet or not self.exchange:
+            return 0, 0, 0
+
+        try:
+            rows = await self.db.fetch(
+                "SELECT order_id, symbol, side, entry_price, quantity, quantity_usd, "
+                "stop_loss, take_profit, strategy, confidence, reasoning, time as opened_at "
+                "FROM trades WHERE venue = $1 AND status = 'open' "
+                "ORDER BY time DESC",
+                VENUE,
+            )
+        except Exception as e:
+            logger.warning(f"[{INSTANCE_ID}] Could not query open positions from DB: {e}")
+            return 0, 0, 0
+
+        if not rows:
+            return 0, 0, 0
+
+        logger.info(f"[{INSTANCE_ID}] Reconciliación: {len(rows)} posiciones 'open' encontradas en DB para venue={VENUE}")
+
+        recovered = 0
+        ghost_closed = 0
+        unverified = 0
+
+        for row in rows:
+            order_id = row["order_id"]
+            symbol = row["symbol"]
+            side = row["side"]
+            swap_sym = self._swap_symbol(symbol)
+
+            still_open = False
+            try:
+                if SWAP_ENABLED:
+                    all_positions = await self.exchange.fetch_positions()
+                    still_open = any(
+                        p.get("symbol") == swap_sym
+                        and abs(float(p.get("contracts", 0) or 0)) > 0
+                        for p in all_positions
+                    )
+                else:
+                    open_orders = await self.exchange.fetch_open_orders(symbol)
+                    still_open = len(open_orders) > 0
+            except Exception as e:
+                logger.error(
+                    f"[{INSTANCE_ID}] API check failed for {symbol} order {order_id}: {e}. "
+                    f"Marcando como open_unverified para revisión manual."
+                )
+                unverified += 1
+                try:
+                    await self.db.execute(
+                        "UPDATE trades SET status = 'open_unverified' "
+                        "WHERE order_id = $1 AND venue = $2",
+                        order_id, VENUE,
+                    )
+                except Exception:
+                    pass
+                continue
+
+            if still_open:
+                entry_price = float(row["entry_price"])
+                quantity = float(row["quantity"])
+                quantity_usd = float(row["quantity_usd"])
+
+                self.portfolio.positions[order_id] = {
+                    "symbol": symbol,
+                    "side": side,
+                    "quantity": quantity,
+                    "entry_price": entry_price,
+                    "quantity_usd": quantity_usd,
+                    "stop_loss": row.get("stop_loss"),
+                    "take_profit": row.get("take_profit"),
+                    "strategy": row.get("strategy", ""),
+                    "confidence": float(row.get("confidence", 0) or 0),
+                    "reasoning": row.get("reasoning", ""),
+                    "opened_at": row["opened_at"].isoformat() if hasattr(row["opened_at"], "isoformat") else str(row["opened_at"]),
+                }
+                self.portfolio.cash -= quantity_usd
+                recovered += 1
+                logger.info(f"[{INSTANCE_ID}] RECUPERADA posición {order_id}: {side} {symbol} ${quantity_usd:.2f}")
+            else:
+                await self.db.execute(
+                    "UPDATE trades SET status = 'ghost_closed', closed_reason = 'reconciled_on_startup' "
+                    "WHERE order_id = $1 AND venue = $2",
+                    order_id, VENUE,
+                )
+                ghost_closed += 1
+                logger.info(f"[{INSTANCE_ID}] GHOST_CLOSED posición {order_id}: {side} {symbol}")
+
+        return recovered, ghost_closed, unverified
 
     async def initialize(self):
         self.redis = await RedisClient.get_instance()
@@ -229,20 +338,30 @@ class PaperTradingEngine:
         testnet_balance = await self._fetch_testnet_balance()
         effective_capital = INITIAL_CAPITAL if INITIAL_CAPITAL > 0 else testnet_balance
         self.portfolio = Portfolio(effective_capital, settings.BASE_CURRENCY)
+
+        rec_recovered, rec_ghost, rec_unverified = await self._reconcile_positions()
+
         if self.use_testnet and self.exchange:
-            logger.info(f"[{INSTANCE_ID}] Connected to testnet, starting fresh (ignoring restored simulation state)")
             await self.redis.set_json(STATE_KEY, {
-                "cash": effective_capital, "positions": {},
+                "cash": self.portfolio.cash, "positions": self.portfolio.positions,
                 "total_fees": 0, "total_slippage": 0,
                 "updated_at": datetime.now(timezone.utc).isoformat(),
             })
         else:
             await self.load_state()
+
+        local_limit = MAX_POSITIONS_BY_VENUE.get(VENUE, 10)
         logger.info(
-            f"[{INSTANCE_ID}] Paper Trading initialized: capital=${effective_capital:.2f}, "
+            f"[{INSTANCE_ID}] Paper Trading initialized: capital=${self.portfolio.cash:.2f}, "
             f"strategy_filter={STRATEGY_FILTER or 'all'}, min_conf={MIN_CONFIDENCE}, "
-            f"max_pos={MAX_POSITION_PCT*100:.0f}%"
+            f"max_pos={MAX_POSITION_PCT*100:.0f}%, local_limit={local_limit}"
         )
+        if rec_recovered > 0 or rec_ghost > 0 or rec_unverified > 0:
+            logger.info(
+                f"[{INSTANCE_ID}] Reconciliación completa: {rec_recovered} posiciones recuperadas, "
+                f"{rec_ghost} marcadas ghost_closed, {rec_unverified} sin verificar, "
+                f"arrancando con {len(self.portfolio.positions)} posiciones activas"
+            )
         await self.redis.set_json(f"portfolio:initial_capital:{VENUE}", testnet_balance if self.use_testnet else effective_capital)
 
     async def load_state(self):
@@ -304,8 +423,17 @@ class PaperTradingEngine:
                             venue_used = VENUE
                         else:
                             venue_used = "paper"
+                    funding_charge = 0.0
+                    if pos and SWAP_ENABLED:
+                        opened_at = datetime.fromisoformat(pos.get("opened_at", datetime.now(timezone.utc).isoformat()))
+                        hours_open = (datetime.now(timezone.utc) - opened_at).total_seconds() / 3600
+                        if hours_open > 8:
+                            notional = pos.get("margin", 0) * pos.get("leverage", 1)
+                            funding_charge = notional * settings.FUNDING_RATE_8H * (hours_open / 8)
+                            logger.info(f"[{INSTANCE_ID}] Funding charge for {order.symbol}: ${funding_charge:.4f} ({hours_open:.1f}h open)")
                     result = self.portfolio.close_position(
                         oid, order.entry_price, reason=order.reasoning,
+                        funding_charge=funding_charge,
                     )
                     if result:
                         result["signal_id"] = order.signal_id
@@ -313,6 +441,14 @@ class PaperTradingEngine:
                         await self.publish_result(result)
                         await self.store_trade(result)
             else:
+                local_limit = MAX_POSITIONS_BY_VENUE.get(VENUE, 10)
+                if len(self.portfolio.positions) >= local_limit:
+                    logger.info(
+                        f"[{INSTANCE_ID}] Rechazado: límite local de venue alcanzado "
+                        f"({len(self.portfolio.positions)}/{local_limit}) para {order.symbol}"
+                    )
+                    return
+
                 if self.use_testnet:
                     exchange_side = order.side.value
                     testnet = await self._place_testnet_order(
@@ -326,6 +462,11 @@ class PaperTradingEngine:
                         venue_used = VENUE
                     else:
                         venue_used = "paper"
+                fee_rate = self._get_fee_rate()
+                slippage_rate = self._get_slippage_rate(order.symbol)
+                if testnet and testnet.get("fee", 0) > 0:
+                    notional = order.quantity_usd * LEVERAGE
+                    fee_rate = testnet["fee"] / notional if notional > 0 else fee_rate
                 result = self.portfolio.open_position(
                     order_id=order.order_id,
                     symbol=order.symbol,
@@ -339,6 +480,8 @@ class PaperTradingEngine:
                     confidence=order.confidence,
                     reasoning=order.reasoning,
                     leverage=LEVERAGE,
+                    fee_rate=fee_rate,
+                    slippage_rate=slippage_rate,
                 )
                 if result:
                     result["signal_id"] = order.signal_id
@@ -366,6 +509,7 @@ class PaperTradingEngine:
     async def publish_result(self, result: dict):
         trade_result = TradeResult(
             order_id=result["order_id"],
+            signal_id=result.get("signal_id", ""),
             symbol=result["symbol"],
             side=SignalType(result["side"]),
             entry_price=result["entry_price"],
@@ -374,6 +518,7 @@ class PaperTradingEngine:
             quantity_usd=result["quantity_usd"],
             fee_usd=result["fee_usd"],
             slippage_usd=result.get("slippage_usd", 0),
+            funding_usd=result.get("funding_usd", 0),
             pnl_usd=result["pnl_usd"],
             status=OrderStatus(result["status"]),
             strategy=result.get("strategy", ""),
@@ -389,13 +534,17 @@ class PaperTradingEngine:
     async def store_trade(self, result: dict):
         try:
             await self.db.execute(
-                """INSERT INTO trades (time, order_id, symbol, side, entry_price, exit_price,
-                   quantity, quantity_usd, fee_usd, pnl_usd, status, strategy, confidence, reasoning,
+                """INSERT INTO trades (time, order_id, signal_id, symbol, side, entry_price, exit_price,
+                   quantity, quantity_usd, fee_usd, slippage_usd, funding_usd, pnl_usd,
+                   status, strategy, confidence, reasoning,
                    stop_loss, take_profit, venue)
-                   VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)""",
-                datetime.now(timezone.utc), result["order_id"], result["symbol"],
+                   VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13,
+                   $14, $15, $16, $17, $18, $19, $20)""",
+                datetime.now(timezone.utc), result["order_id"], result.get("signal_id", ""),
+                result["symbol"],
                 result["side"], result["entry_price"], result.get("exit_price", result["entry_price"]),
                 result["quantity"], result["quantity_usd"], result["fee_usd"],
+                result.get("slippage_usd", 0), result.get("funding_usd", 0),
                 result["pnl_usd"], result["status"], result.get("strategy", ""),
                 result.get("confidence", 0), result.get("reasoning", ""),
                 result.get("stop_loss"), result.get("take_profit"),

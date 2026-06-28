@@ -1,8 +1,8 @@
 import asyncio
 import logging
+import os
 import sys
 import math
-import random
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
@@ -16,6 +16,12 @@ from shared.redis_client import RedisClient
 from shared.db import Database
 from shared.models import OHLCVData, TechnicalIndicators
 from scanner import compute_indicators
+
+_SEED = os.environ.get("MOCK_SEED")
+if _SEED:
+    np.random.seed(int(_SEED))
+else:
+    np.random.seed(42)
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(name)s] %(levelname)s: %(message)s")
 logger = logging.getLogger("mock-scanner")

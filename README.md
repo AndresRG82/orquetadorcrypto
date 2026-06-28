@@ -125,8 +125,12 @@ docker compose logs -f dashboard
 | `OLLAMA_MODEL` | `qwen2.5:3b` | Modelo LLM para análisis |
 | `INITIAL_CAPITAL` | `1000.0` | Capital inicial simulado |
 | `MAX_POSITION_PCT` | `0.20` | Máximo 20% del capital por posición |
-| `SLIPPAGE_PCT` | `0.001` | Deslizamiento simulado (0.1%) |
-| `TRADING_FEE_PCT` | `0.00075` | Comisión simulada (0.075%) |
+| `SLIPPAGE_PCT` | `0.001` | Deslizamiento simulado (0.1%) — usado como fallback |
+| `TRADING_FEE_PCT` | `0.00075` | Comisión simulada (0.075%) — usado como fallback |
+| `TRADING_FEE_SPOT_PCT` | `0.001` | Comisión spot (0.10%, real OKX taker) |
+| `TRADING_FEE_PERP_PCT` | `0.0005` | Comisión perp swap (0.05%, real OKX taker) |
+| `FUNDING_RATE_8H` | `0.0003` | Funding rate ~0.03%/8h para swaps |
+| | | Slippage por par: BTC/ETH=0.05%, SOL/BNB=0.10%, resto=0.20% |
 
 ## Estructura
 

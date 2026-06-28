@@ -4,7 +4,9 @@
 import asyncio
 import json
 import logging
+import os
 import sys
+from collections import deque
 from datetime import datetime, timezone, timedelta
 
 sys.path.insert(0, "/app")
@@ -17,6 +19,8 @@ logger = logging.getLogger("circuit-breaker")
 
 CHECK_INTERVAL = 10
 
+MIN_SAMPLE_LOSS_RATE = int(os.getenv("MIN_SAMPLE_LOSS_RATE", "10"))
+
 RULES = {
     "consecutive_losses": 7,
     "loss_rate_window_min": 10,
@@ -27,6 +31,7 @@ RULES = {
     "pause_duration_min": 20,
     "critical_pause_min": 45,
     "history_max": 50,
+    "signal_spike_history_size": 10,
 }
 
 
@@ -35,11 +40,26 @@ class CircuitBreaker:
         self.redis: RedisClient | None = None
         self.db: Database | None = None
         self.running = False
+        self.signal_spike_history: deque[float] = deque(maxlen=RULES["signal_spike_history_size"])
 
     async def initialize(self):
         self.redis = await RedisClient.get_instance()
         self.db = await Database.get_instance()
-        logger.info("Circuit Breaker initialized")
+        existing = await self.redis.client.get("circuit:state")
+        if existing:
+            state = json.loads(existing)
+            if state.get("status") == "tripped":
+                logger.warning(
+                    f"Estado recuperado de Redis: circuit TRIPPED, "
+                    f"reason={state.get('reason')}, resume_at={state.get('resume_at')}"
+                )
+            else:
+                logger.info(
+                    f"Estado recuperado de Redis: circuit OPEN, "
+                    f"evaluated_at={state.get('evaluated_at')}"
+                )
+        else:
+            logger.info("Sin estado previo encontrado, circuit breaker iniciando desde cero")
 
     async def run(self):
         await self.initialize()
@@ -140,8 +160,10 @@ class CircuitBreaker:
                 WHERE status = 'closed' 
                 AND time > NOW() - INTERVAL '{window_min} minutes'
             """)
-            if rows and rows[0]["total"] > 0:
-                return rows[0]["losses"] / rows[0]["total"]
+            if rows and rows[0]["total"] >= MIN_SAMPLE_LOSS_RATE:
+                rate = rows[0]["losses"] / rows[0]["total"]
+                logger.debug(f"loss_rate: {rows[0]['losses']}/{rows[0]['total']} = {rate:.0%}")
+                return rate
             return 0.0
         except Exception:
             return 0.0
@@ -163,15 +185,16 @@ class CircuitBreaker:
     async def _get_signal_spike(self) -> float:
         try:
             current = await self.redis.client.xlen("strategy:signals") or 0
-            avg_key = "circuit:avg_signals"
-            avg = await self.redis.client.get(avg_key)
-            if avg is None:
-                await self.redis.client.set(avg_key, str(current), ex=3600)
+            self.signal_spike_history.append(current)
+            if len(self.signal_spike_history) < RULES["signal_spike_history_size"]:
                 return 1.0
-            avg_val = float(avg)
-            if avg_val == 0:
+            prev_readings = list(self.signal_spike_history)[:-1]
+            avg_baseline = sum(prev_readings) / len(prev_readings)
+            if avg_baseline == 0:
                 return 1.0
-            return current / avg_val
+            spike = current / avg_baseline
+            logger.debug(f"signal_spike: current={current} avg_baseline={avg_baseline:.1f} spike={spike:.1f}x")
+            return spike
         except Exception:
             return 1.0
 

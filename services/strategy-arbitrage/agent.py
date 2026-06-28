@@ -1,292 +1,176 @@
 import asyncio
 import logging
 import sys
-import uuid
-from datetime import datetime, timezone
-from typing import Optional
-from collections import defaultdict
-
-import httpx
 
 sys.path.insert(0, "/app")
-from shared.config import settings
-from shared.redis_client import RedisClient
-from shared.models import TechnicalIndicators, TradingSignal, SignalType
-from shared.alpha_zoo.integration import AlphaIntegration
+from shared.strategy_base import BaseStrategyAgent
+from shared.models import TechnicalIndicators, SignalType
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(name)s] %(levelname)s: %(message)s")
 logger = logging.getLogger("strategy-arbitrage")
 
-ALLOWED_REGIMES = {"trending_up", "trending_down", "ranging"}
-
-CORRELATION_PAIRS = {
-    "BTC/USDT": ["ETH/USDT", "SOL/USDT", "BNB/USDT"],
-    "ETH/USDT": ["BTC/USDT", "SOL/USDT", "LINK/USDT"],
-    "SOL/USDT": ["BTC/USDT", "ETH/USDT", "AVAX/USDT"],
-}
+ARBITRAGE_TIMEFRAMES = {"15m", "1h", "4h"}
+CORRELATION_PAIRS = [("BTC", "ETH")]
 
 
-class ArbitrageAgent:
+class ArbitrageAgent(BaseStrategyAgent):
+    strategy_name = "arbitrage"
+    allowed_regimes = {"ranging", "trending_up", "trending_down"}
+    param_defaults = {
+        "correlation_window": 48, "correlation_threshold": 0.95,
+        "divergence_threshold": 2.0, "zscore_mean_period": 48, "zscore_std_period": 48,
+        "zscore_entry": 2.0, "zscore_exit": 0.5,
+        "volatility_squeeze_threshold": 1.5, "min_bb_squeeze_hours": 6,
+        "atr_tp_multiplier": 1.5, "atr_sl_multiplier": 1.2,
+        "min_confidence": 0.6,
+        "active": True, "cooldown_seconds": 7200, "confidence_weight": 1.0,
+        "alpha_zoo_enabled": True, "alpha_zoo_weight": 0.2, "alpha_zoo_timeframe": "1h",
+        "rr_min": 1.5,
+    }
+    param_redis_key = "strategy:params:arbitrage"
+    config_redis_key = "strategy:config:arbitrage"
+    heartbeat_key = "strategy-arbitrage"
+    consumer_group = "strategy-arbitrage"
+    consumer_name = "arbitrage-consumer-1"
+    stream_block_ms = 5000
+
     def __init__(self):
-        self.redis: RedisClient | None = None
-        self.running = False
-        self.latest_data: dict[str, dict[str, TechnicalIndicators]] = defaultdict(dict)
-        self.qwen_url = settings.QWEN_ANALYZER_URL
-        self.params: dict = {}
-        self.alpha = AlphaIntegration()
+        super().__init__()
+        self.latest_data: dict[str, dict] = {}
 
-    async def initialize(self):
-        self.redis = await RedisClient.get_instance()
-        await self.load_params()
-        await self.alpha.ensure_db()
-        logger.info("Arbitrage agent initialized (strict thresholds)")
+    async def blend_alpha(self, ind: TechnicalIndicators, result: dict) -> dict:
+        alpha_enabled = self.params.get("alpha_zoo_enabled", True)
+        if not alpha_enabled:
+            return result
 
-    async def load_params(self):
-        stored = await self.redis.get_json("strategy:params:arbitrage")
-        config = await self.redis.get_json("strategy:config:arbitrage")
-        defaults = {
-            "min_confidence": 0.5,
-            "correlation_price_div": 3.0, "correlation_rsi_div": 15,
-            "bb_width_threshold": 0.03,
-            "bb_position_extreme_high": 0.95, "bb_position_extreme_low": 0.05,
-            "atr_tp_multiplier": 2.5, "atr_sl_multiplier": 1.0,
-            "active": True, "cooldown_seconds": 7200, "confidence_weight": 1.0,
-            "alpha_zoo_enabled": True, "alpha_zoo_weight": 0.3, "alpha_zoo_timeframe": "1h",
-        }
-        self.params = {**defaults, **(stored or {}), **(config or {})}
-        logger.info(f"Arbitrage params loaded: bb_width={self.params['bb_width_threshold']} sl_mult={self.params['atr_sl_multiplier']}")
+        alpha_tf = self.params.get("alpha_zoo_timeframe", "1h")
+        await self.alpha.ensure_scores(alpha_tf)
+        alpha_score = self.alpha.get_alpha_score(ind.symbol)
 
-    async def _check_regime(self) -> bool:
-        try:
-            regime_data = await self.redis.get_json("market:regime")
-            if regime_data:
-                regime = regime_data.get("regime")
-                if regime and regime not in ALLOWED_REGIMES:
-                    logger.info(f"Regime '{regime}' not allowed for arbitrage, skipping")
-                    return False
-        except Exception:
-            pass
-        return True
+        if abs(alpha_score or 0) > 0.01:
+            result["alpha_boost"] = alpha_score
+            result["confidence"] = min(0.95, result["confidence"] + abs(alpha_score) * 0.15)
+            result["reasoning"] += f" | alpha_zoo={alpha_score:+.3f} (boosted)"
 
-    def check_correlation_divergence(self, ind: TechnicalIndicators) -> Optional[dict]:
-        symbol = ind.symbol
-        p = self.params
-        if symbol not in CORRELATION_PAIRS:
-            return None
+        return result
 
-        correlated = CORRELATION_PAIRS[symbol]
-        divergences = []
-
-        for corr_symbol in correlated:
-            corr_ind = self.latest_data.get(corr_symbol, {}).get(ind.timeframe)
-            if corr_ind is None:
+    async def check_correlation_divergence(self, ind: TechnicalIndicators) -> dict | None:
+        for base_a, base_b in CORRELATION_PAIRS:
+            sym_a = f"{base_a}/USDT"
+            sym_b = f"{base_b}/USDT"
+            if ind.symbol not in (sym_a, sym_b):
                 continue
 
-            if ind.price_change_pct is not None and corr_ind.price_change_pct is not None:
-                price_div = ind.price_change_pct - corr_ind.price_change_pct
+            counterpart = sym_b if ind.symbol == sym_a else sym_a
+            if counterpart not in self.latest_data.get("prices", {}):
+                continue
 
-                if ind.rsi_14 is not None and corr_ind.rsi_14 is not None:
-                    rsi_div = ind.rsi_14 - corr_ind.rsi_14
+            prices = self.latest_data.get("prices", {}).get(counterpart, [])
+            if len(prices) < self.params["correlation_window"]:
+                continue
 
-                    if abs(price_div) > p["correlation_price_div"] and abs(rsi_div) > p["correlation_rsi_div"]:
-                        divergences.append({
-                            "pair": corr_symbol,
-                            "price_divergence": price_div,
-                            "rsi_divergence": rsi_div,
-                        })
+            import statistics
+            series_a = prices[-self.params["correlation_window"]:]
+            series_b_key = ind.symbol + "_prices"
+            series_b = self.latest_data.get("prices", {}).get(series_b_key, [])
+            if len(series_b) < self.params["correlation_window"]:
+                continue
 
-        if not divergences:
-            return None
+            series_b = series_b[-self.params["correlation_window"]:]
+            corr = self._pearson(series_a, series_b)
+            zscore_a = (series_a[-1] - statistics.mean(series_a)) / max(statistics.stdev(series_a), 1e-8)
+            zscore_b = (series_b[-1] - statistics.mean(series_b)) / max(statistics.stdev(series_b), 1e-8)
+            spread = zscore_a - zscore_b
 
-        avg_div = sum(d["price_divergence"] for d in divergences) / len(divergences)
-        if abs(avg_div) < 2.0:
-            return None
-
-        if avg_div > 0:
-            signal = SignalType.SELL
-            reasoning = f"[ARBITRAGE] {symbol} outperforming peers by {avg_div:.1f}% - mean reversion expected"
-        else:
-            signal = SignalType.BUY
-            reasoning = f"[ARBITRAGE] {symbol} underperforming peers by {abs(avg_div):.1f}% - mean reversion expected"
-
-        confidence = min(0.85, 0.5 + abs(avg_div) * 0.05)
-
-        return {
-            "signal": signal,
-            "confidence": confidence,
-            "reasoning": reasoning,
-            "divergences": divergences,
-        }
-
-    def check_volatility_squeeze(self, ind: TechnicalIndicators) -> Optional[dict]:
-        if ind.bb_upper is None or ind.bb_lower is None or ind.atr_14 is None or ind.bb_middle is None:
-            return None
-        p = self.params
-
-        bb_width = (ind.bb_upper - ind.bb_lower) / ind.bb_middle if ind.bb_middle and ind.bb_middle > 0 else 0
-        atr_pct = ind.atr_14 / ind.close if ind.close > 0 else 0
-
-        if bb_width < p["bb_width_threshold"] and atr_pct < 0.005:
-            price_position = (ind.close - ind.bb_lower) / (ind.bb_upper - ind.bb_lower) if ind.bb_upper != ind.bb_lower else 0.5
-
-            volume_confirms = False
-            if ind.volume_sma_20 is not None and ind.volume_change_pct is not None:
-                if ind.volume_change_pct > 50:
-                    volume_confirms = True
-
-            if price_position > p["bb_position_extreme_high"]:
-                signal = SignalType.SELL
-                confidence = 0.55 if volume_confirms else 0.45
-            elif price_position < p["bb_position_extreme_low"]:
-                signal = SignalType.BUY
-                confidence = 0.55 if volume_confirms else 0.45
-            else:
-                return None
-
-            if confidence < p["min_confidence"]:
-                return None
-
-            reasoning = f"[ARBITRAGE] Vol squeeze on {ind.symbol} BB_width={bb_width:.4f} pos={price_position:.2f}"
-            if volume_confirms:
-                reasoning += " volume confirms"
-
-            return {
-                "signal": signal,
-                "confidence": confidence,
-                "reasoning": reasoning,
-            }
+            if abs(spread) > self.params["zscore_entry"]:
+                signal = SignalType.BUY if spread < 0 else SignalType.SELL
+                confidence = min(0.95, 0.5 + abs(spread) * 0.1)
+                reasoning = (
+                    f"Correlation ({corr:.2f}) divergence detected "
+                    f"zscore_diff={spread:.2f}, {ind.symbol} → {signal.value}"
+                )
+                return {"signal": signal, "confidence": confidence,
+                        "reasoning": reasoning, "technical_score": abs(spread)}
 
         return None
 
-    async def query_qwen(self, ind: TechnicalIndicators, arb_result: dict) -> Optional[dict]:
-        try:
-            async with httpx.AsyncClient(timeout=20.0) as client:
-                payload = {
-                    "symbol": ind.symbol,
-                    "timeframe": ind.timeframe,
-                    "close": ind.close,
-                    "technical_score": 0,
-                    "technical_reasoning": arb_result["reasoning"],
-                }
-                resp = await client.post(f"{self.qwen_url}/analyze", json=payload)
-                resp.raise_for_status()
-                return resp.json()
-        except Exception as e:
-            logger.warning(f"Qwen query failed: {e}")
+    async def check_volatility_squeeze(self, ind: TechnicalIndicators) -> dict | None:
+        score = 0
+        reasons = []
+
+        if ind.bb_upper is not None and ind.bb_lower is not None and ind.bb_middle is not None and ind.bb_upper > ind.bb_lower:
+            bb_width_pct = (ind.bb_upper - ind.bb_lower) / ind.bb_middle * 100
+            if bb_width_pct < self.params["volatility_squeeze_threshold"]:
+                score += 1; reasons.append(f"BB squeeze ({bb_width_pct:.2f}%)")
+
+        if ind.atr_14 is not None:
+            atr_pct = ind.atr_14 / max(ind.close, 1e-8) * 100
+            if atr_pct > 3.0:
+                reasons.append(f"High volatility (ATR%: {atr_pct:.1f})")
+            if atr_pct > 5.0:
+                score += 1; reasons.append(f"Extreme volatility (ATR%: {atr_pct:.1f})")
+
+        if ind.rsi_14 is not None:
+            if ind.rsi_14 < 30:
+                score += 1; reasons.append(f"RSI oversold ({ind.rsi_14:.1f})")
+            elif ind.rsi_14 > 70:
+                score -= 1; reasons.append(f"RSI overbought ({ind.rsi_14:.1f})")
+
+        if not reasons:
             return None
 
+        signal = SignalType.BUY if score > 0 else SignalType.SELL if score < 0 else SignalType.HOLD
+        if signal == SignalType.HOLD:
+            return None
+
+        confidence = min(0.85, 0.4 + abs(score) * 0.15)
+        return {"signal": signal, "confidence": confidence,
+                "reasoning": "; ".join(reasons), "technical_score": score}
+
+    async def evaluate(self, ind: TechnicalIndicators) -> dict | None:
+        if ind.timeframe not in ARBITRAGE_TIMEFRAMES:
+            return None
+
+        result = await self.check_correlation_divergence(ind)
+        if result is not None:
+            return result
+
+        if ind.timeframe in ("1h", "4h"):
+            result = await self.check_volatility_squeeze(ind)
+            if result is not None:
+                return result
+
+        return None
+
+    def _pearson(self, xs: list[float], ys: list[float]) -> float:
+        import statistics
+        n = min(len(xs), len(ys))
+        if n < 3:
+            return 0.0
+        xs, ys = xs[:n], ys[:n]
+        mx, my = statistics.mean(xs), statistics.mean(ys)
+        num = sum((x - mx) * (y - my) for x, y in zip(xs, ys))
+        den = max(
+            (sum((x - mx) ** 2 for x in xs) * sum((y - my) ** 2 for y in ys)) ** 0.5,
+            1e-8,
+        )
+        return max(-1.0, min(1.0, num / den))
+
     async def process_indicator(self, data: dict):
-        try:
-            ind = TechnicalIndicators(**data)
-            self.latest_data[ind.symbol][ind.timeframe] = ind
+        if self.latest_data.setdefault("prices", {}).setdefault(data.get("symbol", ""), []):
+            self.latest_data["prices"][data["symbol"]].append(data.get("close", 0))
+            max_win = max(self.params["correlation_window"] * 2, 100)
+            if len(self.latest_data["prices"][data["symbol"]]) > max_win:
+                self.latest_data["prices"][data["symbol"]] = (
+                    self.latest_data["prices"][data["symbol"]][-max_win:]
+                )
 
-            regime_allowed = await self._check_regime()
-            if not regime_allowed:
-                return
-
-            arb_result = self.check_correlation_divergence(ind)
-            if arb_result is None:
-                arb_result = self.check_volatility_squeeze(ind)
-
-            if arb_result is None:
-                return
-
-            if self.params.get("alpha_zoo_enabled", True):
-                await self.alpha.ensure_scores(self.params.get("alpha_zoo_timeframe", "1h"))
-                alpha_score = self.alpha.get_alpha_score(ind.symbol)
-                if abs(alpha_score) > 0.01:
-                    alpha_boost = 1.0 + abs(alpha_score) * 0.05
-                    arb_result["confidence"] = min(0.95, arb_result["confidence"] * alpha_boost)
-                    direction = "bullish" if alpha_score > 0 else "bearish"
-                    arb_result["reasoning"] += f" | alpha_zoo={alpha_score:+.3f} ({direction})"
-
-            if arb_result["confidence"] < self.params["min_confidence"]:
-                return
-
-            qwen_result = await self.query_qwen(ind, arb_result)
-
-            final_confidence = arb_result["confidence"]
-            final_reasoning = arb_result["reasoning"]
-
-            if qwen_result:
-                try:
-                    qwen_signal = qwen_result.get("signal", "hold")
-                    qwen_confidence = qwen_result.get("confidence", 0.5)
-                    qwen_reasoning = qwen_result.get("reasoning", "")
-
-                    if qwen_signal.lower() == arb_result["signal"].value:
-                        final_confidence = (arb_result["confidence"] + qwen_confidence) / 2 + 0.05
-                        final_reasoning += f" | Qwen confirms: {qwen_reasoning}"
-                    else:
-                        final_confidence *= 0.5
-                        final_reasoning += f" | Qwen disagrees ({qwen_signal})"
-                except Exception:
-                    pass
-
-            final_confidence = min(1.0, max(0.0, final_confidence))
-
-            if final_confidence < self.params["min_confidence"]:
-                return
-
-            target = None
-            stop = None
-            if ind.atr_14 is not None:
-                if arb_result["signal"] == SignalType.BUY:
-                    target = round(ind.close + ind.atr_14 * self.params["atr_tp_multiplier"], 8)
-                    stop = round(ind.close - ind.atr_14 * self.params["atr_sl_multiplier"], 8)
-                else:
-                    target = round(ind.close - ind.atr_14 * self.params["atr_tp_multiplier"], 8)
-                    stop = round(ind.close + ind.atr_14 * self.params["atr_sl_multiplier"], 8)
-
-            signal = TradingSignal(
-                signal_id=str(uuid.uuid4()),
-                symbol=ind.symbol, timeframe=ind.timeframe,
-                timestamp=datetime.now(timezone.utc),
-                signal=arb_result["signal"], confidence=final_confidence,
-                strategy="arbitrage", reasoning=final_reasoning,
-                entry_price=ind.close, target_price=target, stop_loss=stop,
-                indicators_snapshot=ind,
-            )
-
-            await self.redis.publish(settings.STREAM_SIGNALS, signal.model_dump(mode="json"))
-            logger.info(f"ARBITRAGE signal: {signal.signal.value} {signal.symbol} {signal.timeframe} conf={signal.confidence:.2f}")
-
-        except Exception as e:
-            logger.error(f"Error processing: {e}")
-
-    async def run(self):
-        self.running = True
-        await self.initialize()
-        group = "strategy-arbitrage"
-        consumer = "arb-consumer-1"
-
-        logger.info("Arbitrage agent running (strict mode)")
-        reload_counter = 0
-        while self.running:
-            try:
-                await self.redis.heartbeat("strategy-arbitrage")
-                messages = await self.redis.read_stream(settings.STREAM_INDICATORS, group, consumer, count=10, block=5000)
-                for msg_id, data in messages:
-                    try:
-                        asyncio.create_task(self.process_indicator(data))
-                    except Exception:
-                        pass
-                reload_counter += 1
-                if reload_counter % 100 == 0:
-                    await self.load_params()
-                if reload_counter % 50 == 0 and self.params.get("alpha_zoo_enabled", True):
-                    asyncio.create_task(self.alpha.ensure_scores(self.params.get("alpha_zoo_timeframe", "1h")))
-            except asyncio.CancelledError:
-                break
-            except Exception as e:
-                logger.error(f"Arbitrage agent error: {e}")
-                await asyncio.sleep(5)
+        await super().process_indicator(data)
 
 
 async def main():
     agent = ArbitrageAgent()
     await agent.run()
-
 
 if __name__ == "__main__":
     asyncio.run(main())
