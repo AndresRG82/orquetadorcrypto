@@ -19,6 +19,12 @@ IDLE_RESTART_MS = 600_000
 STREAM_FRESHNESS_WARN_S = 300
 STREAM_FRESHNESS_RESTART_S = 600
 
+# Streams affected by circuit-breaker pauses need relaxed stale thresholds.
+# CB auto-resume cycle is ~20 min; we set override to 3600s (1h) to survive
+# at least 2 full cycles without false-positive restarts.
+CB_PAUSE_OVERRIDE_S = 3600
+CB_PAUSE_OVERRIDE_MS = 3_600_000
+
 CONSUMER_MAP = {
     "market:data": {
         "producer": "crypto-trader-market-scanner-1",
@@ -44,12 +50,17 @@ CONSUMER_MAP = {
         "consumers": {
             "orchestrator-approved": "crypto-trader-orchestrator-1",
         },
+        "stale_restart_s": CB_PAUSE_OVERRIDE_S,
     },
     "trade:orders": {
         "producer": "crypto-trader-risk-manager-1",
         "consumers": {
-            "paper-trading-orders-main": "crypto-trader-paper-trading-1",
+            "paper-trading-orders-main": {
+                "container": "crypto-trader-paper-trading-1",
+                "idle_restart_ms": CB_PAUSE_OVERRIDE_MS,
+            },
         },
+        "stale_restart_s": CB_PAUSE_OVERRIDE_S,
     },
     "trade:results": {
         "producer": "crypto-trader-paper-trading-1",
@@ -58,6 +69,7 @@ CONSUMER_MAP = {
             "risk-manager-results": "crypto-trader-risk-manager-1",
             "stop-loss-results": "crypto-trader-stop-loss-1",
         },
+        "stale_restart_s": CB_PAUSE_OVERRIDE_S,
     },
 }
 
@@ -133,17 +145,26 @@ class Watchdog:
     async def check_consumers(self):
         for stream, config in CONSUMER_MAP.items():
             consumers = config.get("consumers", {})
-            for group_name, container_name in consumers.items():
+            for group_name, entry in consumers.items():
+                if isinstance(entry, str):
+                    container_name = entry
+                    restart_ms = IDLE_RESTART_MS
+                    warn_ms = IDLE_WARN_MS
+                else:
+                    container_name = entry["container"]
+                    restart_ms = entry.get("idle_restart_ms", IDLE_RESTART_MS)
+                    warn_ms = entry.get("idle_warn_ms", IDLE_WARN_MS)
+
                 infos = await self.get_consumer_info(stream, group_name)
                 for info in infos:
                     idle_ms = info.get("idle", 0)
                     pending = info.get("pending", 0)
 
-                    if idle_ms > IDLE_RESTART_MS:
-                        reason = f"Consumer {group_name} idle {idle_ms/1000:.0f}s (>{IDLE_RESTART_MS/1000:.0f}s), pending={pending}"
+                    if idle_ms > restart_ms:
+                        reason = f"Consumer {group_name} idle {idle_ms/1000:.0f}s (>{restart_ms/1000:.0f}s), pending={pending}"
                         await self.restart_container(container_name, reason)
-                    elif idle_ms > IDLE_WARN_MS:
-                        logger.warning(f"WARN: Consumer {group_name} idle {idle_ms/1000:.0f}s (>{IDLE_WARN_MS/1000:.0f}s)")
+                    elif idle_ms > warn_ms:
+                        logger.warning(f"WARN: Consumer {group_name} idle {idle_ms/1000:.0f}s (>{warn_ms/1000:.0f}s)")
 
     async def check_streams(self):
         for stream, config in CONSUMER_MAP.items():
@@ -153,19 +174,22 @@ class Watchdog:
 
             age_s = time.time() - last_msg_time
 
+            restart_s = config.get("stale_restart_s", STREAM_FRESHNESS_RESTART_S)
+            warn_s = config.get("stale_warn_s", STREAM_FRESHNESS_WARN_S)
+
             producer = config.get("producer")
-            if isinstance(producer, str) and age_s > STREAM_FRESHNESS_RESTART_S:
+            if isinstance(producer, str) and age_s > restart_s:
                 container = CONSUMER_MAP[stream].get("producer")
                 if container:
-                    reason = f"Stream {stream} stale {age_s:.0f}s (>{STREAM_FRESHNESS_RESTART_S}s)"
+                    reason = f"Stream {stream} stale {age_s:.0f}s (>{restart_s}s)"
                     await self.restart_container(container, reason)
-            elif isinstance(producer, str) and age_s > STREAM_FRESHNESS_WARN_S:
+            elif isinstance(producer, str) and age_s > warn_s:
                 logger.warning(f"WARN: Stream {stream} stale {age_s:.0f}s")
 
             producers = config.get("producers", {})
-            if producers and age_s > STREAM_FRESHNESS_RESTART_S:
+            if producers and age_s > restart_s:
                 for strat_name, container_name in producers.items():
-                    reason = f"Stream {stream} stale {age_s:.0f}s (>{STREAM_FRESHNESS_RESTART_S}s), possibly {strat_name}"
+                    reason = f"Stream {stream} stale {age_s:.0f}s (>{restart_s}s), possibly {strat_name}"
                     await self.restart_container(container_name, reason)
                     break
 

@@ -449,6 +449,8 @@ class PaperTradingEngine:
                     )
                     return
 
+                fee_rate = self._get_fee_rate()
+                slippage_rate = self._get_slippage_rate(order.symbol)
                 if self.use_testnet:
                     exchange_side = order.side.value
                     testnet = await self._place_testnet_order(
@@ -460,13 +462,21 @@ class PaperTradingEngine:
                         order.quantity = testnet["quantity"]
                         order.quantity_usd = testnet["price"] * testnet["quantity"]
                         venue_used = VENUE
+                        notional = order.quantity_usd * LEVERAGE
+                        if testnet["fee"] > 0 and notional > 0:
+                            implied_fee_rate = testnet["fee"] / notional
+                            if implied_fee_rate < 0.01:
+                                fee_rate = implied_fee_rate
+                            else:
+                                logger.warning(
+                                    f"[{INSTANCE_ID}] Testnet fee ${testnet['fee']:.4f} "
+                                    f"implies {implied_fee_rate:.4%} rate for ${notional:.2f} notional, "
+                                    f"using configured {fee_rate:.4%} instead"
+                                )
                     else:
                         venue_used = "paper"
-                fee_rate = self._get_fee_rate()
-                slippage_rate = self._get_slippage_rate(order.symbol)
-                if testnet and testnet.get("fee", 0) > 0:
-                    notional = order.quantity_usd * LEVERAGE
-                    fee_rate = testnet["fee"] / notional if notional > 0 else fee_rate
+                else:
+                    venue_used = "paper"
                 result = self.portfolio.open_position(
                     order_id=order.order_id,
                     symbol=order.symbol,
@@ -533,23 +543,38 @@ class PaperTradingEngine:
 
     async def store_trade(self, result: dict):
         try:
-            await self.db.execute(
-                """INSERT INTO trades (time, order_id, signal_id, symbol, side, entry_price, exit_price,
-                   quantity, quantity_usd, fee_usd, slippage_usd, funding_usd, pnl_usd,
-                   status, strategy, confidence, reasoning,
-                   stop_loss, take_profit, venue)
-                   VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13,
-                   $14, $15, $16, $17, $18, $19, $20)""",
-                datetime.now(timezone.utc), result["order_id"], result.get("signal_id", ""),
-                result["symbol"],
-                result["side"], result["entry_price"], result.get("exit_price", result["entry_price"]),
-                result["quantity"], result["quantity_usd"], result["fee_usd"],
-                result.get("slippage_usd", 0), result.get("funding_usd", 0),
-                result["pnl_usd"], result["status"], result.get("strategy", ""),
-                result.get("confidence", 0), result.get("reasoning", ""),
-                result.get("stop_loss"), result.get("take_profit"),
-                result.get("venue", "paper"),
-            )
+            if result.get("status") == "closed":
+                await self.db.execute(
+                    """UPDATE trades SET exit_price=$1, fee_usd=$2, slippage_usd=$3,
+                       funding_usd=$4, pnl_usd=$5, status='closed', closed_reason=$6,
+                       reasoning=$7, signal_id=$8, venue=$9
+                       WHERE order_id=$10 AND status='open'""",
+                    result.get("exit_price", result["entry_price"]),
+                    result["fee_usd"], result.get("slippage_usd", 0),
+                    result.get("funding_usd", 0), result["pnl_usd"],
+                    result.get("reasoning", "Closed position")[:200],
+                    result.get("reasoning", "")[:500],
+                    result.get("signal_id", ""), result.get("venue", "paper"),
+                    result["order_id"],
+                )
+            else:
+                await self.db.execute(
+                    """INSERT INTO trades (time, order_id, signal_id, symbol, side, entry_price, exit_price,
+                       quantity, quantity_usd, fee_usd, slippage_usd, funding_usd, pnl_usd,
+                       status, strategy, confidence, reasoning,
+                       stop_loss, take_profit, venue)
+                       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13,
+                       $14, $15, $16, $17, $18, $19, $20)""",
+                    datetime.now(timezone.utc), result["order_id"], result.get("signal_id", ""),
+                    result["symbol"],
+                    result["side"], result["entry_price"], result.get("exit_price", result["entry_price"]),
+                    result["quantity"], result["quantity_usd"], result["fee_usd"],
+                    result.get("slippage_usd", 0), result.get("funding_usd", 0),
+                    result["pnl_usd"], result["status"], result.get("strategy", ""),
+                    result.get("confidence", 0), result.get("reasoning", ""),
+                    result.get("stop_loss"), result.get("take_profit"),
+                    result.get("venue", "paper"),
+                )
         except Exception as e:
             logger.error(f"[{INSTANCE_ID}] Error storing trade: {e}")
 

@@ -148,6 +148,8 @@ services:
     networks:
       - trader-net
 
+  # PAUSADO Jul 3 2026 — PF=0.04 en 438 trades (-$301). Reactivar cuando walk-forward
+  # tenga ≥60 días OHLCV reales (~Sep 27 2026) con parámetros re-optimizados.
   strategy-arbitrage:
     build:
       context: .
@@ -371,6 +373,9 @@ services:
       DB_PASSWORD: ${TIMESCALE_PASSWORD:-trader123}
       OLLAMA_HOST: ${OLLAMA_HOST:-http://host.docker.internal:11434}
       OLLAMA_MODEL: ${OLLAMA_MODEL:-qwen2.5:3b}
+      EVO_START_DATE: ${EVO_START_DATE:-2026-06-16}
+      EVO_MIN_RR: ${EVO_MIN_RR:-1.1}
+      EVO_SWEEP_ENABLED: ${EVO_SWEEP_ENABLED:-false}
     depends_on:
       redis:
         condition: service_healthy
@@ -444,6 +449,8 @@ services:
       REDIS_PORT: 6379
     volumes:
       - monitoring_logs:/app/logs/monitoring
+    networks:
+      - trader-net
     depends_on:
       redis:
         condition: service_healthy

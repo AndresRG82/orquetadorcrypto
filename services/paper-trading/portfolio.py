@@ -37,6 +37,11 @@ class Portfolio:
         _fee_rate = fee_rate if fee_rate is not None else float(settings.TRADING_FEE_PCT)
         _slippage_rate = slippage_rate if slippage_rate is not None else float(settings.SLIPPAGE_PCT)
         fee = notional * _fee_rate
+        MAX_FEE_RATE = 0.01
+        if _fee_rate > MAX_FEE_RATE:
+            logger.warning(f"Fee rate {_fee_rate:.4%} > {MAX_FEE_RATE:.1%}, capping at configured max")
+            _fee_rate = min(_fee_rate, float(settings.TRADING_FEE_PCT) or 0.001)
+            fee = notional * _fee_rate
         slippage = notional * _slippage_rate
         effective_price = entry_price * (1 + _slippage_rate) if side == "buy" else entry_price * (1 - _slippage_rate)
         quantity = notional / effective_price
@@ -121,6 +126,10 @@ class Portfolio:
         _fee_rate = pos.get("fee_rate") or float(settings.TRADING_FEE_PCT)
         effective_close = close_price * (1 - _slippage_rate) if pos["side"] == "buy" else close_price * (1 + _slippage_rate)
 
+        MAX_CLOSE_FEE_RATE = 0.01
+        if _fee_rate > MAX_CLOSE_FEE_RATE:
+            logger.warning(f"Close fee rate {_fee_rate:.4%} > {MAX_CLOSE_FEE_RATE:.1%}, capping")
+            _fee_rate = float(settings.TRADING_FEE_PCT) or 0.001
         fee = pos["quantity"] * effective_close * _fee_rate
         slippage = abs(effective_close - close_price) * pos["quantity"]
         self.total_fees += fee

@@ -28,6 +28,10 @@ SNAPSHOT_PREFIX = "evolution:snapshot:"
 CURRENT_PREFIX = "evolution:current"
 HISTORY_KEY = "evolution:history"
 
+EVO_START_DATE = os.getenv("EVO_START_DATE", "")  # "2026-06-16" or empty=no filter
+EVO_MIN_RR = float(os.getenv("EVO_MIN_RR", "1.1"))
+EVO_SWEEP_ENABLED = os.getenv("EVO_SWEEP_ENABLED", "false").lower() == "true"
+
 SYSTEM_PROMPT = """You are an expert algorithmic trading system optimizer. You receive a snapshot of the current system performance and parameters, and propose changes to improve profitability.
 
 RULES:
@@ -137,6 +141,10 @@ class EvolutionAgent:
 
     async def fetch_ohlcv_for_sweep(self, symbol: str, timeframe: str, days: int = 30) -> Optional[pd.DataFrame]:
         since = datetime.now(timezone.utc) - timedelta(days=days)
+        if EVO_START_DATE:
+            start_dt = datetime.strptime(EVO_START_DATE, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+            if start_dt > since:
+                since = start_dt
         rows = await self.db.fetch(
             "SELECT time, open, high, low, close, volume FROM ohlcv "
             "WHERE symbol = $1 AND timeframe = $2 AND time > $3 ORDER BY time ASC",
@@ -147,9 +155,12 @@ class EvolutionAgent:
         df = pd.DataFrame([dict(r) for r in rows])
         df["time"] = pd.to_datetime(df["time"])
         df.set_index("time", inplace=True)
+        df = df[~df.index.duplicated(keep="first")]
         for col in ["open", "high", "low", "close", "volume"]:
             df[col] = pd.to_numeric(df[col], errors="coerce")
         df.dropna(inplace=True)
+        if len(df) < 50:
+            return None
         return df
 
     def compute_signals(self, df: pd.DataFrame, strategy: str, params: dict, df_htf: Optional[pd.DataFrame] = None) -> tuple[pd.Series, pd.Series]:
@@ -256,7 +267,7 @@ class EvolutionAgent:
 
         buy_signal, sell_signal = self.compute_signals(df, strategy, params, df_htf=df_htf)
         if buy_signal.sum() == 0 and sell_signal.sum() == 0:
-            return {"strategy": strategy, "total_trades": 0, "message": "No signals"}
+            return {"strategy": strategy, "total_trades": 0, "total_pnl": 0, "sharpe_ratio": 0, "win_rate": 0, "max_drawdown_pct": 0, "message": "No signals"}
 
         portfolio = vbt.Portfolio.from_signals(
             df["close"], buy_signal, sell_signal,
@@ -275,31 +286,19 @@ class EvolutionAgent:
         }
 
     def _param_grid(self, strategy: str) -> dict:
+        atr_sl_range = [round(0.5 + i * 0.25, 2) for i in range(9)]   # 0.5 to 2.5 step 0.25
+        atr_tp_range = [round(1.0 + i * 0.25, 2) for i in range(13)]  # 1.0 to 4.0 step 0.25
         if strategy == "scalping":
             return {
-                "rsi_oversold_strong": [20, 25],
-                "rsi_oversold_weak": [35, 40],
-                "rsi_overbought_strong": [75, 80],
-                "rsi_overbought_weak": [60, 65],
-                "bb_position_low": [0.10, 0.20],
-                "bb_position_high": [0.80, 0.90],
-                "atr_sl_multiplier": [1.0, 1.2],
-                "atr_tp_multiplier": [3.0, 4.0],
-                "min_score": [2, 3],
+                "atr_sl_multiplier": atr_sl_range,
+                "atr_tp_multiplier": atr_tp_range,
             }
         elif strategy == "swing":
-            return {
-                "rsi_oversold": [25, 30, 35],
-                "rsi_overbought": [65, 70, 75],
-                "atr_sl_multiplier": [1.0, 1.5],
-                "atr_tp_multiplier": [3.0, 4.0],
-            }
+            return {}
         elif strategy == "arbitrage":
             return {
-                "bb_position_low": [0.03, 0.05, 0.08],
-                "bb_position_high": [0.92, 0.95, 0.97],
-                "atr_sl_multiplier": [0.8, 1.0],
-                "atr_tp_multiplier": [2.5, 3.5],
+                "atr_sl_multiplier": atr_sl_range,
+                "atr_tp_multiplier": atr_tp_range,
             }
         return {}
 
@@ -339,6 +338,9 @@ class EvolutionAgent:
             logger.info(f"Train: {len(df_train)} rows, Test: {len(df_test)} rows ({test_split*100:.0f}%)")
 
             param_grid = self._param_grid(strategy)
+            if not param_grid:
+                logger.info(f"Skipping {strategy}: empty param grid (not in this optimization cycle)")
+                continue
             keys = list(param_grid.keys())
             values = list(param_grid.values())
             combos = list(product(*values))
@@ -404,6 +406,9 @@ class EvolutionAgent:
 
     async def apply_vectorbt_results(self, sweep_results: list[dict]) -> list[dict]:
         applied = []
+        risk_params = await self.redis.get_json("risk:params") or {}
+        current_min_rr = float(risk_params.get("min_risk_reward", 1.5))
+
         for result in sweep_results:
             strategy = result["strategy"]
             oos_approved = result.get("oos_approved", False)
@@ -414,6 +419,38 @@ class EvolutionAgent:
             best = result["best"]
             params = best.get("params", {})
 
+            rr_gate_ok = True
+            if "atr_tp_multiplier" in params and "atr_sl_multiplier" in params:
+                new_rr = params["atr_tp_multiplier"] / params["atr_sl_multiplier"]
+                sl = params["atr_sl_multiplier"]
+                tp = params["atr_tp_multiplier"]
+                if not (0.3 <= sl <= 5.0):
+                    logger.warning(f"{strategy}: atr_sl_multiplier={sl} outside sanity bounds [0.3, 5.0], rejecting")
+                    rr_gate_ok = False
+                if not (0.5 <= tp <= 8.0):
+                    logger.warning(f"{strategy}: atr_tp_multiplier={tp} outside sanity bounds [0.5, 8.0], rejecting")
+                    rr_gate_ok = False
+                if new_rr < EVO_MIN_RR:
+                    logger.warning(f"{strategy}: RR={new_rr:.2f} < EVO_MIN_RR={EVO_MIN_RR}, rejecting")
+                    rr_gate_ok = False
+                if new_rr < current_min_rr:
+                    logger.warning(f"{strategy}: RR={new_rr:.2f} < current min_risk_reward={current_min_rr}, rejecting")
+                    rr_gate_ok = False
+                if rr_gate_ok:
+                    logger.info(f"{strategy}: RR gate PASSED (RR={new_rr:.2f}, sl={sl}, tp={tp})")
+            else:
+                logger.info(f"{strategy}: no ATR params to gate, passing through")
+
+            if not rr_gate_ok:
+                logger.info(f"Skipping deploy for {strategy}: RR coherence gate or sanity bounds not met")
+                applied.append({
+                    "type": "vectorbt_optimization",
+                    "target": strategy,
+                    "params": {},
+                    "reasoning": f"REJECTED: RR={params.get('atr_tp_multiplier', '?')}/{params.get('atr_sl_multiplier', '?')}={params.get('atr_tp_multiplier', 0)/params.get('atr_sl_multiplier', 1):.2f} < min_risk_reward={current_min_rr} or EVO_MIN_RR={EVO_MIN_RR}",
+                })
+                continue
+
             current = await self.redis.get_json(f"strategy:params:{strategy}") or {}
             changed = {k: v for k, v in params.items() if current.get(k) != v}
 
@@ -423,7 +460,7 @@ class EvolutionAgent:
                     "type": "vectorbt_optimization",
                     "target": strategy,
                     "params": changed,
-                    "reasoning": f"Vectorbt sweep: Sharpe={best['sharpe_ratio']:.2f} PnL=${best['total_pnl']:.2f} WR={best['win_rate']:.1f}%",
+                    "reasoning": f"Vectorbt sweep: Sharpe={best['sharpe_ratio']:.2f} PnL=${best['total_pnl']:.2f} WR={best['win_rate']:.1f}% RR={params.get('atr_tp_multiplier',0)/params.get('atr_sl_multiplier',1):.2f}",
                 })
                 logger.info(f"VECTORBT OPT {strategy}: {changed}")
 
@@ -727,11 +764,12 @@ Analyze the system performance and propose up to 5 specific changes to improve p
 
         await self.save_pre_change_snapshot(snapshot)
 
-        vectorbt_results = await self.run_vectorbt_optimization()
         vectorbt_applied = []
-        if vectorbt_results:
-            vectorbt_applied = await self.apply_vectorbt_results(vectorbt_results)
-            logger.info(f"Vectorbt optimization applied {len(vectorbt_applied)} changes")
+        if EVO_SWEEP_ENABLED:
+            vectorbt_results = await self.run_vectorbt_optimization()
+            if vectorbt_results:
+                vectorbt_applied = await self.apply_vectorbt_results(vectorbt_results)
+                logger.info(f"Vectorbt optimization applied {len(vectorbt_applied)} changes")
 
         proposed = await self.query_qwen_for_changes(snapshot)
         if not proposed:
@@ -748,6 +786,10 @@ Analyze the system performance and propose up to 5 specific changes to improve p
     async def run(self):
         self.running = True
         await self.initialize()
+        if EVO_SWEEP_ENABLED:
+            logger.info(f"Vectorbt sweep HABILITADO (EVO_SWEEP_ENABLED=true)")
+        else:
+            logger.info(f"Vectorbt sweep DESHABILITADO (EVO_SWEEP_ENABLED=false) — acumulando datos reales")
         logger.info(f"Evolution Agent running (cycle every {CYCLE_INTERVAL}s = {CYCLE_INTERVAL//3600}h)")
 
         while self.running:
