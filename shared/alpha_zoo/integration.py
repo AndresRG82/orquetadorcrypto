@@ -10,9 +10,10 @@ from shared.db import Database
 
 logger = logging.getLogger(__name__)
 
-ALPHA_PANEL_DAYS = 30
+ALPHA_PANEL_DAYS = 5
 ALPHA_REFRESH_SECONDS = 300
 ALPHA_PANEL_MIN_ROWS = 100
+ALPHA_MAX_SYMBOLS = 30
 
 
 class AlphaIntegration:
@@ -36,16 +37,33 @@ class AlphaIntegration:
         lookback_days: int = ALPHA_PANEL_DAYS,
     ) -> Optional[pd.DataFrame]:
         db = await self.ensure_db()
+
+        top_symbols = await db.fetch(
+            """
+            SELECT symbol
+            FROM ohlcv
+            WHERE timeframe = $1
+              AND time >= NOW() - INTERVAL '1 day' * $2
+            GROUP BY symbol
+            ORDER BY COUNT(*) DESC
+            LIMIT $3
+            """,
+            timeframe, lookback_days, ALPHA_MAX_SYMBOLS,
+        )
+        if not top_symbols:
+            return None
+        symbol_list = [r["symbol"] for r in top_symbols]
+
         rows = await db.fetch(
             """
             SELECT time, symbol, open, high, low, close, volume
             FROM ohlcv
             WHERE timeframe = $1
               AND time >= NOW() - INTERVAL '1 day' * $2
+              AND symbol = ANY($3::text[])
             ORDER BY time, symbol
             """,
-            timeframe,
-            lookback_days,
+            timeframe, lookback_days, symbol_list,
         )
         if not rows:
             return None
